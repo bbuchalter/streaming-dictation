@@ -471,6 +471,328 @@ PHRASES = [
     "Sarnath",                   # Site of first sermon
     "Bodh Gaya",                 # Place of enlightenment
     "Manasarowara",              # Sacred lake referenced in sutras
+
+    # =========================================================================
+    # 51 MENTAL FORMATIONS (Caitta) — Vasubandhu's list
+    # =========================================================================
+
+    # 5 Universal (Sarvatraga)
+    "Sarvatraga",                # universal mental factors
+    "Sparsha",                   # contact
+    "Manaskara",                 # attention
+    "Manasikara",                # attention (Pali)
+    "Samjna",                    # perception (Sanskrit)
+    "Cetana",                    # volition
+
+    # 5 Object-Determining (Viniyata)
+    "Viniyata",                  # object-determining factors
+    "Chanda",                    # desire/intention
+    "Adhimoksha",                # determination/decision
+    "Smriti",                    # mindfulness (Sanskrit)
+
+    # 11 Wholesome (Kushala)
+    "Kushala",                   # wholesome
+    "Shraddha",                  # faith
+    "Hri",                       # inner shame/self-respect
+    "Apatrapya",                 # shame before others
+    "Alobha",                    # non-attachment
+    "Advesha",                   # non-hatred
+    "Amoha",                     # non-bewilderment
+    "Prasrabdhi",                # tranquility/pliancy
+    "Apramada",                  # conscientiousness
+    "Ahimsa",                    # non-harming
+    "Abhaya",                    # non-fear (TNH addition)
+    "Sthira",                    # stability (TNH addition)
+
+    # 6 Root Afflictions (Mula-klesha)
+    "Klesha",                    # affliction
+    "Pratigha",                  # anger/aversion
+    "Mana",                      # pride/arrogance
+    "Vicikitsa",                 # doubt/suspicion
+    "Drishti",                   # wrong view
+
+    # 20 Secondary Afflictions (Upaklesha)
+    "Upaklesha",                 # secondary affliction
+    "Krodha",                    # rage
+    "Upanaha",                   # resentment
+    "Mraksha",                   # concealment
+    "Pradasha",                  # spitefulness
+    "Irshya",                    # envy
+    "Matsarya",                  # miserliness
+    "Maya",                      # pretense/deceit
+    "Shathya",                   # hypocrisy
+    "Mada",                      # self-infatuation
+    "Vihimsa",                   # malice
+    "Ahrikya",                   # shamelessness
+    "Anapatrapya",               # lack of propriety
+    "Styana",                    # lethargy
+    "Auddhatya",                 # restlessness
+    "Ashraddhya",                # faithlessness
+    "Kaushidya",                 # laziness
+    "Pramada",                   # heedlessness
+    "Mushitasmritita",           # forgetfulness
+    "Asamprajanya",              # inattentiveness
+    "Vikshepa",                  # distraction
+
+    # 4 Changeable (Aniyata)
+    "Aniyata",                   # changeable factors
+    "Kaukritya",                 # regret/remorse
+    "Middha",                    # sleep/drowsiness
+    "Vitarka",                   # initial thought
+    "Vichara",                   # sustained thought
+
+    # Category terms
+    "Caitta",                    # mental factor
+    "Caitasika",                 # mental factor (alt)
+    "Cetasika",                  # mental factor (Pali)
+    "Akushala",                  # unwholesome
+
+    # =========================================================================
+    # 12 LINKS OF DEPENDENT ORIGINATION (Dvadasha Nidana)
+    # =========================================================================
+
+    "Dvadasha Nidana",           # twelve links
+    "Samskara",                  # formations (link 2)
+    "Namarupa",                  # name-and-form (link 4)
+    "Shadayatana",               # six sense bases (link 5)
+    "Trishna",                   # craving (Sanskrit)
+    "Upadana",                   # clinging (link 9)
+    "Bhava",                     # becoming (link 10)
+    "Jati",                      # birth (link 11)
+    "Jaramarana",                # aging-and-death (link 12)
+    "Avijja",                    # ignorance (Pali)
+    "Salayatana",                # six sense bases (Pali)
+    "Phassa",                    # contact (Pali)
+    "Jara",                      # aging
+    "Marana",                    # death
+
+    # =========================================================================
+    # 8 CONSCIOUSNESSES IN DETAIL (Yogacara)
+    # =========================================================================
+
+    "Cakshur-vijnana",           # eye consciousness
+    "Shrotra-vijnana",           # ear consciousness
+    "Ghrana-vijnana",            # nose consciousness
+    "Jihva-vijnana",             # tongue consciousness
+    "Kaya-vijnana",              # body consciousness
+    "Mano-vijnana",              # mind consciousness (6th)
+    "Klishta-manovijnana",       # defiled mental consciousness (7th)
+    "Pravrtti-vijnana",          # manifest consciousnesses
+    "Adana-vijnana",             # appropriating consciousness
+    "Trisvabhava",               # three natures
+    "Parikalpita",               # imagined nature
+    "Paratantra",                # dependent nature
+    "Parinishpanna",             # consummate nature
+    "Ashraya-paravrtti",         # transformation at the base
+    "Vasana",                    # habit energy/impressions
+    "Vipaka",                    # fruition/maturation
+    "Prapancha",                 # conceptual proliferation
+    "Svabhava",                  # self-nature
+    "Cittamatra",                # mind-only
+    "Vijnanavada",               # consciousness doctrine
+
+    # =========================================================================
+    # ABHIDHARMA TERMS
+    # =========================================================================
+
+    "Abhidharma",                # higher teaching
+    "Abhidharmakosa",            # treasury of abhidharma (Vasubandhu)
+    "Abhidharmasamuccaya",       # compendium of abhidharma (Asanga)
+    "Samskrita",                 # conditioned
+    "Asamskrita",                # unconditioned
+    "Akasha",                    # space (unconditioned)
+    "Pratisamkhya-nirodha",      # cessation through deliberation
+    "Nirodha-samapatti",         # attainment of cessation
+    "Prapti",                    # accrual/possession
+    "Jivitendriya",              # life-force
+    "Dharma-lakshana",           # characteristics of dharmas
+    "Svalakshana",               # particular characteristic
+    "Hetu",                      # cause
+    "Pratyaya",                  # condition
+    "Phala",                     # fruit/result
+    "Klishta",                   # defiled
+    "Aklishta",                  # undefiled
+
+    # =========================================================================
+    # SIX AND TEN PARAMITAS
+    # =========================================================================
+
+    "Paramita",                  # perfection
+    "Kshanti",                   # patience/forbearance
+    "Dhyana",                    # meditation
+    "Upaya",                     # skillful means
+    "Pranidhana",                # aspiration/vow
+    "Jnana",                     # knowledge/gnosis
+    "Nekkhamma",                 # renunciation (Pali)
+    "Sacca",                     # truthfulness (Pali)
+    "Adhitthana",                # determination (Pali)
+    "Khanti",                    # patience (Pali)
+
+    # =========================================================================
+    # 37 WINGS OF AWAKENING (Bodhipakkhiya Dhamma)
+    # =========================================================================
+
+    "Bodhipakkhiya Dhamma",      # 37 factors of awakening
+    "Sammappadhana",             # four right efforts
+    "Iddhipada",                 # four bases of spiritual power
+    "Indriya",                   # spiritual faculties
+    "Bala",                      # spiritual powers
+    "Magganga",                  # path factors
+
+    # Four Foundations of Mindfulness
+    "Kayanupassana",             # contemplation of body
+    "Vedananupassana",           # contemplation of feelings
+    "Cittanupassana",            # contemplation of mind
+    "Dhammanupassana",           # contemplation of dharmas
+
+    # Five Faculties / Powers
+    "Saddha",                    # faith (Pali)
+    "Viriya",                    # effort (Pali)
+
+    # Seven Factors of Enlightenment
+    "Dhamma-vicaya",             # investigation of dharma
+    "Piti",                      # rapture (Pali)
+    "Passaddhi",                 # tranquility (Pali)
+
+    # Noble Eightfold Path (Pali)
+    "Samma Ditthi",              # right view
+    "Samma Sankappa",            # right intention
+    "Samma Vaca",                # right speech
+    "Samma Kammanta",            # right action
+    "Samma Ajiva",               # right livelihood
+    "Samma Vayama",              # right effort
+    "Samma Sati",                # right mindfulness
+    "Samma Samadhi",             # right concentration
+
+    # =========================================================================
+    # SUTRA CHARACTERS AND CONTENT
+    # =========================================================================
+
+    # Buddha's disciples
+    "Shariputra",
+    "Mahakashyapa",
+    "Mahamaudgalyayana",
+    "Subhuti",
+    "Mahakatyayana",
+    "Ananda",
+    "Rahula",
+    "Mahaprajapati",
+    "Yashodhara",
+    "Devadatta",
+
+    # Lotus Sutra characters
+    "Prabhutaratna",             # Many Treasures Buddha
+    "Vishishtacharitra",         # Superior Practices Bodhisattva
+    "Bhaishajyaraja",            # Medicine King Bodhisattva
+    "Gadgadasvara",              # Wonderful Sound Bodhisattva
+
+    # Avatamsaka Sutra
+    "Gandavyuha",                # Entry into the Realm of Reality
+    "Sudhana",                   # main character
+    "Huayan",                    # Chinese school
+    "Hoa Nghiem",                # Vietnamese for Huayan
+
+    # Additional sutra/text names
+    "Vimalakirtinirdesha",       # Vimalakirti Sutra (full)
+    "Arthapada",                 # collection TNH translates from
+
+    # =========================================================================
+    # CHINESE/VIETNAMESE BUDDHIST TERMS
+    # =========================================================================
+
+    "An Lac",                    # peace and happiness
+    "Chanh Niem",                # right mindfulness
+    "Tam",                       # mind/heart
+    "Tinh Do",                   # Pure Land
+    "Chan Nhu",                  # suchness
+    "Giac Ngo",                  # enlightenment
+    "Vo Thuong",                 # impermanence
+    "Vo Nga",                    # non-self
+    "Bo Tat",                    # Bodhisattva (Vietnamese)
+    "A Di Da",                   # Amitabha (Vietnamese)
+    "Quan The Am",               # Avalokiteshvara (Vietnamese)
+    "Van Thu",                   # Manjushri (Vietnamese)
+    "Dia Tang",                  # Kshitigarbha (Vietnamese)
+    "Pho Hien",                  # Samantabhadra (Vietnamese)
+    "Kinh",                      # sutra (Vietnamese)
+    "Tam Bao",                   # Three Jewels
+    "Tu Dieu De",                # Four Noble Truths
+    "Bat Chanh Dao",             # Noble Eightfold Path
+    "Nam Mo",                    # Namo (Vietnamese)
+    "Cong Phu",                  # daily practice/liturgy
+    "Phat",                      # Buddha (Vietnamese)
+
+    # Vietnamese Zen lineages
+    "Truc Lam",                  # Bamboo Forest school
+    "Yen Tu",                    # mountain of Truc Lam
+    "Tran Nhan Tong",            # king who founded Truc Lam
+    "Vinitaruci",                # founder of first Vietnamese Zen lineage
+    "Van Hanh",                  # early Vietnamese patriarch
+    "Thich Thanh Tu",            # modern Truc Lam reviver
+
+    # =========================================================================
+    # JAPANESE ZEN TERMS
+    # =========================================================================
+
+    "Kinhin",                    # walking meditation
+    "Dokusan",                   # private interview
+    "Teisho",                    # formal dharma talk
+    "Satori",                    # sudden awakening
+    "Kensho",                    # seeing true nature
+    "Roshi",                     # Zen master
+    "Zendo",                     # meditation hall
+    "Ango",                      # practice period
+    "Jukai",                     # taking precepts
+    "Rakusu",                    # small robe
+    "Okesa",                     # monk's robe
+    "Kyosaku",                   # awakening stick
+    "Mokugyo",                   # wooden fish drum
+    "Zafu",                      # sitting cushion
+    "Zabuton",                   # sitting mat
+    "Seiza",                     # kneeling posture
+    "Gassho",                    # palms together
+    "Makyo",                     # illusory visions
+
+    # =========================================================================
+    # TIBETAN TERMS
+    # =========================================================================
+
+    "Tonglen",                   # giving and receiving
+    "Dzogchen",                  # great perfection
+    "Rinpoche",                  # precious one (title)
+    "Tulku",                     # reincarnate lama
+    "Lama",                      # teacher
+    "Geshe",                     # scholar
+    "Bardo",                     # intermediate state
+    "Vajra",                     # diamond/thunderbolt
+    "Vajrayana",                 # diamond vehicle
+    "Rigpa",                     # awareness
+    "Mahamudra",                 # great seal
+    "Stupa",                     # reliquary monument
+
+    # =========================================================================
+    # HISTORICAL FIGURES
+    # =========================================================================
+
+    "Asanga",                    # Yogacara co-founder
+    "Dignaga",                   # Buddhist logician
+    "Dharmakirti",               # epistemologist
+    "Kumarajiva",                # great translator
+    "Buddhaghosa",               # Theravada commentator
+    "Bodhidharma",               # first Zen patriarch
+    "Zhiyi",                     # Tiantai founder
+    "Shantideva",                # author of Bodhicharyavatara
+    "Chandrakirti",              # Madhyamaka philosopher
+    "Atisha",                    # Indian-Tibetan master
+    "Milarepa",                  # Tibetan yogi
+
+    # Key texts
+    "Yogacharabhumi",            # Stages of Yogacara Practice
+    "Mahayanasamgraha",          # Summary of the Great Vehicle
+    "Trimsika",                  # Thirty Verses (Vasubandhu)
+    "Vimsatika",                 # Twenty Verses (Vasubandhu)
+    "Madhyantavibhaga",          # Distinguishing Middle from Extremes
+    "Bodhicharyavatara",         # Way of the Bodhisattva
 ]
 
 url = "https://api.rev.ai/speechtotext/v1/vocabularies"
