@@ -96,7 +96,7 @@
     .caption-text {
       font-size: var(--caption-size, 5vw);
       font-weight: 700;
-      line-height: 1.5;
+      line-height: 2.0;
       word-wrap: break-word;
       overflow-wrap: break-word;
       white-space: pre-wrap;
@@ -448,6 +448,9 @@
 
       function streamText(text) {
         const words = text.split(' ');
+        if (transcript.length > 0) {
+          streamQueue.push('\n');
+        }
         streamQueue.push(...words);
         if (!streaming) drainQueue();
       }
