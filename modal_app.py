@@ -2,19 +2,9 @@ import modal
 
 app = modal.App("streaming-dictation")
 
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install(
-        "llama-cpp-python",
-        "fastapi",
-        "huggingface-hub",
-    )
-    .run_commands(
-        "huggingface-cli download TheBloke/Mistral-7B-Instruct-v0.2-GGUF"
-        " mistral-7b-instruct-v0.2.Q4_K_M.gguf"
-        " --local-dir /models"
-        " --local-dir-use-symlinks False"
-    )
+image = modal.Image.debian_slim(python_version="3.11").pip_install(
+    "anthropic",
+    "fastapi",
 )
 
 SYSTEM_PROMPT = """You are a transcription editor for live Buddhist Dharma talks.
@@ -30,30 +20,24 @@ Rules:
 - Preserve the speaker's words faithfully — do not restructure sentences
 - If a sentence is cut off at the end, include it as-is
 - Use the provided context for continuity — do not repeat words
-  that were already in the previous segment
-
-Previous context: {context}
-Raw transcription: {raw}
-Return only the cleaned text, nothing else."""
+  that were already in the previous segment"""
 
 
 @app.cls(
     image=image,
-    gpu="T4",
-    secrets=[modal.Secret.from_name("streaming-dictation-auth")],
-    container_idle_timeout=300,
-    allow_concurrent_inputs=1,
+    secrets=[
+        modal.Secret.from_name("streaming-dictation-auth"),
+        modal.Secret.from_name("streaming-dictation-anthropic"),
+    ],
+    container_idle_timeout=60,
+    allow_concurrent_inputs=10,
 )
 class PolishModel:
     @modal.enter()
-    def load_model(self):
-        from llama_cpp import Llama
+    def setup_client(self):
+        import anthropic
 
-        self.llm = Llama(
-            model_path="/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf",
-            n_ctx=2048,
-            n_gpu_layers=-1,
-        )
+        self.client = anthropic.Anthropic()
 
     @modal.asgi_app()
     def web(self):
@@ -78,7 +62,6 @@ class PolishModel:
 
         @web_app.post("/polish")
         async def polish(request: Request, body: PolishRequest):
-            # Validate bearer token
             expected = os.environ["BEARER_TOKEN"]
             auth = request.headers.get("Authorization", "")
             if auth != f"Bearer {expected}":
@@ -89,19 +72,16 @@ class PolishModel:
                     yield "data: [DONE]\n\n"
                 return StreamingResponse(empty(), media_type="text/event-stream")
 
-            prompt = SYSTEM_PROMPT.format(context=body.context, raw=body.raw)
-            messages = [{"role": "user", "content": prompt}]
+            user_message = f"Previous context: {body.context}\nRaw transcription: {body.raw}\nReturn only the cleaned text, nothing else."
 
             def generate():
-                response = self.llm.create_chat_completion(
-                    messages=messages,
+                with self.client.messages.stream(
+                    model="claude-haiku-4-5-20251001",
                     max_tokens=256,
-                    stream=True,
-                )
-                for chunk in response:
-                    delta = chunk["choices"][0]["delta"]
-                    if "content" in delta:
-                        text = delta["content"]
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": user_message}],
+                ) as stream:
+                    for text in stream.text_stream:
                         if text:
                             yield f"data: {text}\n\n"
                 yield "data: [DONE]\n\n"
