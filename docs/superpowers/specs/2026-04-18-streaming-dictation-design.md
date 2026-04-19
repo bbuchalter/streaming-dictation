@@ -2,101 +2,141 @@
 
 ## Overview
 
-A web-based closed-captioning app for live Buddhist Dharma talks. A speaker runs the app on a dedicated screen visible to the audience. The browser captures mic audio, sends it to a self-hosted transcription pipeline on Modal, and displays polished captions in real time.
+A web-based closed-captioning app for live Buddhist Dharma talks. A speaker runs the app on a dedicated screen visible to the audience. The browser captures mic audio, streams it to Rev.ai for speech-to-text, buffers the raw transcript, sends it through a self-hosted LLM on Modal for vocabulary polish, and displays the polished captions.
 
 The UI reuses the existing `~/workspace/caption` project — large white text on a black background with fullscreen, font sizing, clear, and export controls.
 
 ## Architecture
 
 ```
-Browser (Client)                       Modal (GPU Backend)
-┌──────────────────────┐              ┌──────────────────────┐
-│                      │              │                      │
-│  Mic (continuous)    │              │  POST /transcribe    │
-│       │              │              │       │              │
-│  MediaRecorder       │   HTTP POST  │  faster-whisper      │
-│  (5s timeslice)  ────┼─────────────▶│  (large-v3)          │
-│       │              │              │       │              │
-│  Sequential queue    │   JSON resp  │  LLM polish          │
-│  ◀───────────────────┼──────────────│  (Mistral 7B)        │
-│       │              │              │       │              │
-│  Caption display     │              │  Return polished     │
-│                      │              │  text + context      │
-└──────────────────────┘              └──────────────────────┘
+Browser                        Rev.ai                Modal (LLM Polish)
+┌────────────────┐        ┌──────────────┐       ┌──────────────────┐
+│                │        │              │       │                  │
+│  Mic ──────────┼──WS───▶│  Streaming   │       │  POST /polish    │
+│  (continuous)  │        │  STT         │       │       │          │
+│                │        │  (Reverb)    │       │  Mistral 7B      │
+│                │◀──WS───│              │       │  (Q4 quantized)  │
+│  Buffer finals │        └──────────────┘       │       │          │
+│       │        │                               │  SSE response    │
+│       ▼        │                               │  (token stream)  │
+│  POST /polish  ├──HTTP POST + context────────▶│                  │
+│                │                               │                  │
+│  ◀─────────────┼──────────SSE tokens───────────│                  │
+│       │        │                               └──────────────────┘
+│       ▼        │
+│  Caption       │
+│  Display       │
+└────────────────┘
 ```
 
-Three components, no intermediate backend:
+**Two external services, browser orchestrates:**
 
-1. **Browser client** — captures audio, sends chunks, displays captions
-2. **Modal endpoint** — runs STT + LLM polish on a single GPU
-3. **Caption display** — adapted from the existing caption project
+1. **Rev.ai** — streaming speech-to-text via WebSocket
+2. **Modal** — LLM polish endpoint (Mistral 7B)
+3. **Browser** — captures audio, connects to both services, displays polished captions
+
+There is no intermediate backend server. The browser talks directly to Rev.ai and Modal.
 
 ## Browser Client
 
-### Audio Capture
+### Audio Capture & Streaming
 
-The mic runs continuously via `MediaRecorder` with a `timeslice` of 5000ms. This fires a `dataavailable` event every 5 seconds without interrupting the mic stream. Each event yields an audio blob (webm/opus format).
+The browser captures mic audio and streams it directly to Rev.ai over a WebSocket connection. Rev.ai expects raw PCM audio (16-bit, 16kHz, mono). The Web Audio API's `AudioWorklet` or `ScriptProcessorNode` captures mic input and resamples/encodes it for Rev.ai's format.
 
-### Request Pipeline
+### Transcript Flow
 
-Each audio chunk is POSTed to the Modal endpoint as `multipart/form-data`:
-- `audio`: the webm blob
-- `context`: the last ~50 words of the previous chunk's polished output (for boundary smoothing)
+1. Rev.ai streams back two types of transcript elements:
+   - `partial` — tentative, frequently revised (ignored)
+   - `final` — committed, will not change (used)
+2. When a `final` element arrives, the browser sends it to Modal for LLM polish
+3. Modal streams back polished tokens via SSE
+4. Polished tokens are appended to the caption display as they arrive
 
-Responses are processed in order via a sequential queue — if chunk 3 returns before chunk 2, it waits. This prevents out-of-order text on the display.
+Only polished text is shown to the audience. There is no raw-then-replace behavior.
+
+### Rev.ai Custom Vocabulary
+
+Rev.ai supports up to 6,000 custom phrases. On WebSocket connection, the browser sends the custom vocabulary list as a connection parameter. This list contains Pali/Sanskrit Buddhist terminology:
+
+```json
+{
+  "custom_vocabulary_id": "<pre-created-vocab-id>"
+}
+```
+
+The vocabulary is created ahead of time via Rev.ai's REST API and referenced by ID during streaming sessions.
+
+Example terms: Dharma, Dhamma, Sutta, Metta, Vipassana, Sangha, Dukkha, Anatta, Anicca, Jhana, Samadhi, Panna, Sila, Nibbana, Satipatthana, Anapanasati, Bodhisattva, Tathagata, Bhikkhu, Dana, Karuna, Mudita, Upekkha, etc.
 
 ### Authentication
 
-On first visit, the app shows a password field. The entered password is stored in `sessionStorage` and sent as a `Authorization: Bearer <token>` header on every request. This prevents unauthorized GPU usage. The token persists across page reloads but clears when the tab is closed.
+On first visit, the app shows a password field. The entered password is stored in `sessionStorage` and sent as:
+- `Authorization: Bearer <token>` header on Modal requests
+- Rev.ai uses its own API token, stored as a constant in the client code (acceptable for personal use; the Rev.ai token is rate-limited and scoped to STT only)
+
+The session password prevents unauthorized Modal GPU usage. It persists across page reloads but clears when the tab is closed.
 
 ### Error Handling
 
-If a request fails (network error, timeout, 500), skip that chunk and continue. A subtle visual indicator (e.g., a brief red dot) signals a dropped chunk. A 5-second gap is acceptable; stopping captioning is not.
+- **Rev.ai WebSocket drops:** Attempt automatic reconnection with exponential backoff. Show "Reconnecting..." status. Audio during the gap is lost — acceptable.
+- **Modal request fails:** Skip that segment, continue with the next. Show a subtle indicator (brief red dot) for dropped segments.
+- **Silence:** Rev.ai sends no finals during silence. No action needed.
 
 ### UI Changes from Existing Caption App
 
 - Replace the textarea input with a Start/Stop mic button in the toolbar
-- Add a status indicator: "Ready", "Listening...", "Processing..."
+- Add a status indicator: "Ready", "Connecting...", "Listening...", "Reconnecting..."
 - Keep all existing controls: fullscreen, font sizing (A-/A+), clear, export
-- The textarea remains hidden as a potential manual fallback
+- Remove the textarea entirely (no manual input mode)
 
 ### State
 
 Minimal client state:
 - `isRecording`: boolean
-- `currentContext`: string (tail of last polished response)
-- `requestQueue`: ordered queue of pending/completed chunk responses
+- `currentContext`: string (last ~50 words of polished output, for LLM context)
 - `sessionToken`: string (from password entry, stored in sessionStorage)
+- `revaiSocket`: WebSocket instance
+- `pendingPolish`: number (count of in-flight polish requests, for status display)
 
 ## Modal Endpoint
 
-### Models
+### Model
 
-Both models run on a single A10G GPU (24GB VRAM):
+**Mistral 7B Instruct, Q4 quantized** (~5GB VRAM) on a T4 GPU (16GB VRAM). The model is downloaded at image build time via `Image.run_commands()`, not on cold start.
 
-- **faster-whisper large-v3** (~3GB VRAM) — best accuracy for speech-to-text
-- **Mistral 7B Instruct, Q4 quantized** (~5GB VRAM) — lightweight LLM for transcript polish
+No STT model is needed — Rev.ai handles that.
 
-Models are downloaded at image build time via `Image.run_commands()`, not on cold start.
+### Endpoint: `POST /polish`
 
-### Endpoint: `POST /transcribe`
-
-**Request:** `multipart/form-data`
-- `audio`: webm/opus audio blob (~5 seconds)
-- `context` (optional): string, last ~50 words of previous polished output
-
-**Response:** JSON
+**Request:** JSON
 ```json
 {
-  "raw": "so when we look at the meta sutta we see that...",
-  "polished": "So when we look at the Metta Sutta, we see that...",
-  "context": "we look at the Metta Sutta, we see that..."
+  "raw": "so when we look at the meta sutta we see that",
+  "context": "...the practice of loving kindness. So when we look at the"
 }
 ```
 
-- `raw`: unmodified faster-whisper output (for debugging)
-- `polished`: LLM-cleaned text for display
-- `context`: tail of polished text for the client to send with the next chunk
+- `raw`: the final transcript segment from Rev.ai
+- `context`: last ~50 words of previously polished output (for continuity)
+
+**Response:** Server-Sent Events (SSE) streaming polished tokens
+
+```
+data: So
+data: when
+data: we
+data: look
+data: at
+data: the
+data: Metta
+data: Sutta,
+data: we
+data: see
+data: that
+data: [DONE]
+```
+
+Each SSE `data` event contains one or more tokens. The client appends them to the display as they arrive. The final `[DONE]` event signals completion.
 
 **Auth:** Validates `Authorization: Bearer <token>` header against a Modal secret. Returns 401 if invalid.
 
@@ -115,8 +155,8 @@ Rules:
   "anicca", "jhana", "samadhi", "panna", "sila", etc.)
 - Preserve the speaker's words faithfully — do not restructure sentences
 - If a sentence is cut off at the end, include it as-is
-- Use the provided context to smooth over chunk boundaries
-  (avoid repeating words that were already in the previous chunk)
+- Use the provided context for continuity — do not repeat words
+  that were already in the previous segment
 
 Previous context: {context}
 Raw transcription: {raw}
@@ -125,25 +165,31 @@ Return only the cleaned text, nothing else.
 
 ### Processing Pipeline
 
-1. Receive audio blob
-2. Decode webm to PCM audio (ffmpeg, bundled in the Modal image)
-3. Run faster-whisper large-v3 transcription
-4. If raw transcript is empty (silence), return `{"raw": "", "polished": "", "context": previous_context}`
-5. Format LLM prompt with raw transcript + context
-6. Run Mistral 7B inference
-7. Extract last ~50 words as new context
-8. Return JSON response
+1. Validate bearer token
+2. Parse JSON body (`raw` and `context`)
+3. If `raw` is empty, return empty SSE stream with `[DONE]`
+4. Format LLM prompt with raw transcript + context
+5. Run Mistral 7B inference with streaming output
+6. Stream tokens as SSE events
+7. Send `[DONE]` event
 
 ## Deployment & Operations
 
 ### Modal Configuration
 
 - Single `modal.py` file
-- GPU: A10G (24GB VRAM, ~$1.10/hr)
+- GPU: T4 (16GB VRAM, ~$0.60/hr) — sufficient for Mistral 7B Q4 alone
 - Container timeout: 5 minutes idle before scale-to-zero
-- Concurrency: 1 (single speaker, sequential chunks)
-- Models baked into image for fast cold starts (~2-3s)
+- Concurrency: 1 (single speaker, sequential segments)
+- Model baked into image for fast cold starts (~2-3s)
 - One Modal secret: the bearer token
+
+### Rev.ai Setup
+
+- Create a Rev.ai account (free tier: 5 hours)
+- Generate an API access token
+- Create a custom vocabulary via the REST API with Buddhist terminology
+- Store the access token and vocabulary ID in the client code
 
 ### Web Client Hosting
 
@@ -154,42 +200,55 @@ Static files — serve from anywhere:
 
 ### Development Workflow
 
-- `modal serve modal.py` — local dev with hot reload
+- `modal serve modal.py` — local dev with hot reload for the LLM endpoint
 - `modal deploy modal.py` — production deployment
 - Edit system prompt in `modal.py` to update vocabulary corrections
+- Update Rev.ai custom vocabulary via their REST API as needed
 
 ### Cost
 
-A 1-hour Dharma talk costs approximately $1.10 (A10G GPU time). Scales to zero between talks.
+A 1-hour Dharma talk:
+- Rev.ai streaming STT: ~$0.20
+- Modal T4 GPU: ~$0.60
+- **Total: ~$0.80/hr**
 
-## Chunk Boundary Strategy
+Scales to zero between talks (Modal). Rev.ai is pay-per-use.
 
-Word splitting at 5-second chunk boundaries is handled by two mechanisms:
+### Latency Budget
 
-1. **Whisper robustness** — faster-whisper tends to drop partial words at boundaries rather than hallucinate. The next chunk picks up the missing word naturally.
-2. **LLM context window** — each request includes the last ~50 words from the previous chunk's polished output. The LLM uses this to smooth over boundaries, avoid word repetition, and complete partial thoughts.
+| Step | Time |
+|------|------|
+| Rev.ai streaming STT (to final) | ~0.5-1.0s after utterance |
+| Network: browser → Modal | ~0.1s |
+| Mistral 7B first token | ~0.3-0.5s |
+| Mistral 7B full response (~50 tokens) | ~1.0-1.5s |
+| **Total: utterance to first polished word** | **~1.0-1.5s** |
+| **Total: utterance to full polished segment** | **~2.0-3.0s** |
 
-No overlapping audio buffers or complex ring buffer logic needed.
+First request adds ~2-3s for Modal cold start.
 
 ## Out of Scope
 
-- Multi-user accounts or authentication system (single shared password)
+- Multi-user accounts or authentication system (single shared password for Modal)
 - Transcript storage backend (localStorage + file export is sufficient)
-- Custom vocabulary editing UI (edit the system prompt in `modal.py`)
+- Custom vocabulary editing UI (use Rev.ai REST API directly)
 - Mobile mic testing
 - Speaker diarization (single speaker assumed)
 - Translation
+- Raw transcript display or raw-then-polish display mode
 
 ## Technology Summary
 
 | Component | Technology |
 |-----------|-----------|
-| Audio capture | MediaRecorder API (timeslice) |
-| Audio format | webm/opus |
-| Transport | HTTP POST (fetch), JSON response |
-| STT model | faster-whisper large-v3 |
-| LLM model | Mistral 7B Instruct (Q4) |
-| GPU platform | Modal (A10G) |
-| Auth | Bearer token (shared secret) |
+| Audio capture | Web Audio API (AudioWorklet) |
+| Audio format | PCM 16-bit 16kHz mono |
+| STT service | Rev.ai Reverb (streaming WebSocket) |
+| STT custom vocab | Rev.ai custom vocabulary (up to 6,000 phrases) |
+| LLM model | Mistral 7B Instruct (Q4 quantized) |
+| LLM transport | HTTP POST → SSE response |
+| GPU platform | Modal (T4) |
+| Auth (GPU) | Bearer token (shared secret) |
+| Auth (STT) | Rev.ai API token |
 | Frontend | Vanilla HTML/CSS/JS (single file) |
 | Hosting (frontend) | Static file server |
