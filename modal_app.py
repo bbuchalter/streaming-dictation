@@ -136,6 +136,7 @@ TIBETAN TERMS:
         modal.Secret.from_name("streaming-dictation-deepgram"),
     ],
     scaledown_window=60,
+    timeout=7200,  # 2 hours — long enough for a full Dharma talk
 )
 @modal.concurrent(max_inputs=10)
 class StreamingDictation:
