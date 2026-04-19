@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#000000">
+  <title>Streaming Dictation</title>
+  <style>
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      height: 100%;
+      background: #000000;
+      color: #FFFFFF;
+      font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+      overflow: hidden;
+    }
+
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    /* Password gate */
+    .auth-gate {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      gap: 12px;
+    }
+
+    .auth-gate input {
+      background: #1a1a1a;
+      color: #FFFFFF;
+      border: 1px solid #333333;
+      border-radius: 6px;
+      padding: 12px 16px;
+      font-size: 16px;
+      font-family: inherit;
+      width: 280px;
+      outline: none;
+    }
+
+    .auth-gate input:focus {
+      border-color: #2563eb;
+    }
+
+    .auth-gate button {
+      background: #2563eb;
+      color: #FFFFFF;
+      border: none;
+      padding: 10px 24px;
+      border-radius: 6px;
+      font-size: 16px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+
+    .auth-gate button:hover {
+      background: #1d4ed8;
+    }
+
+    /* Caption display */
+    .caption-display {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      padding: 24px 32px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .caption-display::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 40%;
+      background: linear-gradient(to bottom, #000000 0%, transparent 100%);
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    .caption-text {
+      font-size: var(--caption-size, 5vw);
+      font-weight: 700;
+      line-height: 1.5;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      white-space: pre-wrap;
+    }
+
+    /* Toolbar */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      background: #111111;
+      border-top: 1px solid #333333;
+    }
+
+    .toolbar-spacer {
+      flex: 1;
+    }
+
+    .toolbar button {
+      background: #333333;
+      color: #FFFFFF;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 4px;
+      font-size: 14px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+
+    .toolbar button:hover {
+      background: #444444;
+    }
+
+    .toolbar .btn-start {
+      background: #16a34a;
+    }
+
+    .toolbar .btn-start:hover {
+      background: #15803d;
+    }
+
+    .toolbar .btn-stop {
+      background: #dc2626;
+    }
+
+    .toolbar .btn-stop:hover {
+      background: #b91c1c;
+    }
+
+    .toolbar .btn-fullscreen {
+      background: #2563eb;
+    }
+
+    .toolbar .btn-fullscreen:hover {
+      background: #1d4ed8;
+    }
+
+    /* Status indicator */
+    .status {
+      font-size: 13px;
+      color: #888888;
+    }
+
+    .status.listening {
+      color: #16a34a;
+    }
+
+    .status.error {
+      color: #dc2626;
+    }
+  </style>
+</head>
+<body>
+  <!-- Auth gate -->
+  <div class="auth-gate" id="authGate">
+    <input type="password" id="passwordInput" placeholder="Enter password" autofocus>
+    <button id="authSubmit">Connect</button>
+  </div>
+
+  <!-- Main app (hidden until authenticated) -->
+  <div class="app" id="app" style="display: none;">
+    <div class="caption-display" id="captionDisplay">
+      <div class="caption-text" id="captionText"></div>
+    </div>
+
+    <div class="toolbar" id="toolbar">
+      <button class="btn-start" id="btnMic">Start</button>
+      <span class="status" id="status">Ready</span>
+      <button class="btn-clear" id="btnClear">Clear</button>
+      <button class="btn-export" id="btnExport">Export</button>
+      <div class="toolbar-spacer"></div>
+      <button id="btnSizeDown">A-</button>
+      <button id="btnSizeUp">A+</button>
+      <button class="btn-fullscreen" id="btnFullscreen">Fullscreen</button>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      // ── Config ──
+      const REVAI_ACCESS_TOKEN = '020Ukq9BiI9c7k51wPFDoWe605MGfnfttjZtNzJYpQvo6LPH0716RSzvu0Ae-fcnLYL277Ur5IqCUDRRqMdqbfqLFxLAQ';
+      const REVAI_VOCAB_ID = 'cvGIgdMIaeSDxc7cpP';
+      const MODAL_POLISH_URL = '';
+
+      const BUFFER_LIMIT = 5000;
+      const STORAGE_KEY = 'dictation-transcript';
+
+      // ── DOM ──
+      const authGate = document.getElementById('authGate');
+      const passwordInput = document.getElementById('passwordInput');
+      const authSubmit = document.getElementById('authSubmit');
+      const appEl = document.getElementById('app');
+      const captionText = document.getElementById('captionText');
+      const captionDisplay = document.getElementById('captionDisplay');
+      const btnMic = document.getElementById('btnMic');
+      const btnClear = document.getElementById('btnClear');
+      const btnExport = document.getElementById('btnExport');
+      const btnFullscreen = document.getElementById('btnFullscreen');
+      const btnSizeDown = document.getElementById('btnSizeDown');
+      const btnSizeUp = document.getElementById('btnSizeUp');
+      const statusEl = document.getElementById('status');
+
+      // ── State ──
+      let sessionToken = sessionStorage.getItem('sessionToken') || '';
+      let isRecording = false;
+      let currentContext = '';
+      let transcript = localStorage.getItem(STORAGE_KEY) || '';
+
+      // ── Font size ──
+      const SIZES = [3, 4, 5, 6, 7, 8, 10];
+      let sizeIndex = 2;
+
+      function applySize() {
+        document.documentElement.style.setProperty('--caption-size', SIZES[sizeIndex] + 'vw');
+      }
+
+      // ── Auth ──
+      function authenticate() {
+        const token = passwordInput.value.trim();
+        if (!token) return;
+        sessionToken = token;
+        sessionStorage.setItem('sessionToken', token);
+        showApp();
+      }
+
+      function showApp() {
+        authGate.style.display = 'none';
+        appEl.style.display = 'flex';
+        renderDisplay();
+      }
+
+      authSubmit.addEventListener('click', authenticate);
+      passwordInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') authenticate();
+      });
+
+      if (sessionToken) {
+        showApp();
+      }
+
+      // ── Caption display ──
+      function renderDisplay() {
+        const tail = transcript.length > BUFFER_LIMIT
+          ? transcript.slice(transcript.length - BUFFER_LIMIT)
+          : transcript;
+        captionText.textContent = tail;
+        captionDisplay.scrollTop = captionDisplay.scrollHeight;
+      }
+
+      function appendText(text) {
+        if (!text) return;
+        if (transcript.length > 0 && !transcript.endsWith(' ') && !transcript.endsWith('\n')) {
+          transcript += ' ';
+        }
+        transcript += text;
+        localStorage.setItem(STORAGE_KEY, transcript);
+        renderDisplay();
+      }
+
+      // ── Toolbar: Clear ──
+      btnClear.addEventListener('click', (e) => {
+        e.stopPropagation();
+        transcript = '';
+        currentContext = '';
+        localStorage.removeItem(STORAGE_KEY);
+        captionText.textContent = '';
+      });
+
+      // ── Toolbar: Export ──
+      btnExport.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!transcript) return;
+        const now = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        const timestamp = [
+          now.getFullYear(), pad(now.getMonth() + 1), pad(now.getDate()),
+          '-', pad(now.getHours()), pad(now.getMinutes()), pad(now.getSeconds())
+        ].join('');
+        const blob = new Blob([transcript], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `dharma-talk-${timestamp}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+
+      // ── Toolbar: Fullscreen ──
+      btnFullscreen.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (document.fullscreenElement) {
+          document.exitFullscreen();
+        } else {
+          document.documentElement.requestFullscreen();
+        }
+      });
+
+      document.addEventListener('fullscreenchange', () => {
+        btnFullscreen.textContent = document.fullscreenElement ? 'Exit Fullscreen' : 'Fullscreen';
+      });
+
+      // ── Toolbar: Font size ──
+      btnSizeDown.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (sizeIndex > 0) { sizeIndex--; applySize(); }
+      });
+
+      btnSizeUp.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (sizeIndex < SIZES.length - 1) { sizeIndex++; applySize(); }
+      });
+
+      // ── Status ──
+      function setStatus(text, cls) {
+        statusEl.textContent = text;
+        statusEl.className = 'status' + (cls ? ' ' + cls : '');
+      }
+
+      // ── Polish endpoint ──
+      async function polishText(raw) {
+        if (!raw.trim()) return;
+
+        try {
+          const resp = await fetch(MODAL_POLISH_URL + '/polish', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${sessionToken}`,
+            },
+            body: JSON.stringify({ raw, context: currentContext }),
+          });
+
+          if (!resp.ok) {
+            console.error('Polish failed:', resp.status);
+            appendText(raw);
+            return;
+          }
+
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          let polished = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const text = decoder.decode(value, { stream: true });
+            const lines = text.split('\n');
+
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              const data = line.slice(6);
+              if (data === '[DONE]') continue;
+              polished += data;
+              appendText(data);
+            }
+          }
+
+          const words = polished.split(/\s+/);
+          currentContext = words.slice(-50).join(' ');
+        } catch (err) {
+          console.error('Polish error:', err);
+          appendText(raw);
+        }
+      }
+
+      // ── Rev.ai Streaming ──
+      let audioContext = null;
+      let revaiSocket = null;
+      let scriptNode = null;
+      let micStream = null;
+
+      function buildRevaiUrl() {
+        const params = new URLSearchParams({
+          access_token: REVAI_ACCESS_TOKEN,
+          content_type: `audio/x-raw;layout=interleaved;rate=16000;format=S16LE;channels=1`,
+          remove_disfluencies: 'true',
+        });
+        if (REVAI_VOCAB_ID) {
+          params.set('custom_vocabulary_id', REVAI_VOCAB_ID);
+        }
+        return `wss://api.rev.ai/speechtotext/v1/stream?${params}`;
+      }
+
+      function startRecording() {
+        if (isRecording) return;
+        isRecording = true;
+        btnMic.textContent = 'Stop';
+        btnMic.className = 'btn-stop';
+        setStatus('Connecting...', '');
+
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+
+        revaiSocket = new WebSocket(buildRevaiUrl());
+        revaiSocket.onopen = onRevaiOpen;
+        revaiSocket.onclose = onRevaiClose;
+        revaiSocket.onmessage = onRevaiMessage;
+        revaiSocket.onerror = (e) => {
+          console.error('Rev.ai WebSocket error:', e);
+          setStatus('Connection error', 'error');
+        };
+      }
+
+      function stopRecording() {
+        isRecording = false;
+        btnMic.textContent = 'Start';
+        btnMic.className = 'btn-start';
+        setStatus('Ready', '');
+
+        if (revaiSocket && revaiSocket.readyState === WebSocket.OPEN) {
+          revaiSocket.send('EOS');
+          revaiSocket.close();
+        }
+        revaiSocket = null;
+
+        if (scriptNode) {
+          scriptNode.disconnect();
+          scriptNode = null;
+        }
+
+        if (micStream) {
+          micStream.getTracks().forEach(t => t.stop());
+          micStream = null;
+        }
+
+        if (audioContext) {
+          audioContext.close();
+          audioContext = null;
+        }
+      }
+
+      function onRevaiOpen() {
+        setStatus('Listening...', 'listening');
+
+        navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+          micStream = stream;
+          const source = audioContext.createMediaStreamSource(stream);
+          scriptNode = audioContext.createScriptProcessor(4096, 1, 1);
+
+          scriptNode.addEventListener('audioprocess', (e) => {
+            if (!revaiSocket || revaiSocket.readyState !== WebSocket.OPEN) return;
+            if (audioContext.state === 'suspended' || audioContext.state === 'closed') return;
+
+            const inputData = e.inputBuffer.getChannelData(0);
+
+            // Convert float32 [-1, 1] to PCM S16LE
+            const output = new DataView(new ArrayBuffer(inputData.length * 2));
+            for (let i = 0; i < inputData.length; i++) {
+              const multiplier = inputData[i] < 0 ? 0x8000 : 0x7fff;
+              output.setInt16(i * 2, (inputData[i] * multiplier) | 0, true);
+            }
+
+            // Trim trailing silence
+            const intData = new Int16Array(output.buffer);
+            let end = intData.length;
+            while (end > 0 && intData[end - 1] === 0) { end--; }
+            if (end > 0) {
+              revaiSocket.send(intData.slice(0, end));
+            }
+          });
+
+          source.connect(scriptNode);
+          scriptNode.connect(audioContext.destination);
+        }).catch((err) => {
+          console.error('Mic access denied:', err);
+          setStatus('Mic access denied', 'error');
+          stopRecording();
+        });
+      }
+
+      function onRevaiClose(event) {
+        if (isRecording) {
+          setStatus(`Disconnected (${event.code})`, 'error');
+          stopRecording();
+        }
+      }
+
+      function onRevaiMessage(event) {
+        const data = JSON.parse(event.data);
+
+        switch (data.type) {
+          case 'connected':
+            setStatus('Listening...', 'listening');
+            break;
+
+          case 'partial':
+            break;
+
+          case 'final':
+            const text = data.elements
+              .map(el => el.value)
+              .join('');
+
+            if (text.trim()) {
+              polishText(text);
+            }
+            break;
+        }
+      }
+
+      // ── Mic button ──
+      btnMic.addEventListener('click', () => {
+        if (isRecording) {
+          stopRecording();
+        } else {
+          startRecording();
+        }
+      });
+
+    })();
+  </script>
+</body>
+</html>
