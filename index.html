@@ -229,8 +229,8 @@
 
       const BUFFER_LIMIT = 5000;
       const STORAGE_KEY = 'dictation-transcript';
-      const MAX_RECONNECT_ATTEMPTS = 3;
       const AUDIO_BUFFER_MAX = 40; // ~10 seconds at 250ms chunks
+      const HEARTBEAT_INTERVAL = 15000; // 15s ping to detect dead connections
 
       // ── DOM ──
       const authGate = document.getElementById('authGate');
@@ -262,6 +262,7 @@
       let audioBuffer = [];
       let reconnectAttempts = 0;
       let reconnectTimer = null;
+      let heartbeatTimer = null;
       let intentionalStop = false;
 
       // ── Font size ──
@@ -462,12 +463,32 @@
         setTimeout(drainQueue, 60);
       }
 
+      // ── Heartbeat ──
+      function startHeartbeat() {
+        stopHeartbeat();
+        heartbeatTimer = setInterval(() => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            try { ws.send('PING'); } catch (_) {}
+          } else if (isRecording && !intentionalStop) {
+            // Connection silently died
+            stopHeartbeat();
+            attemptReconnect();
+          }
+        }, HEARTBEAT_INTERVAL);
+      }
+
+      function stopHeartbeat() {
+        if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+      }
+
       // ── WebSocket connection ──
       function connectWebSocket() {
         ws = new WebSocket(MODAL_WS_URL + '/stream?token=' + encodeURIComponent(sessionToken));
 
         ws.onopen = () => {
           reconnectAttempts = 0;
+          startHeartbeat();
+          // Flush buffered audio chunks
           while (audioBuffer.length > 0) {
             const chunk = audioBuffer.shift();
             if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
@@ -497,6 +518,7 @@
         };
 
         ws.onclose = (e) => {
+          stopHeartbeat();
           if (intentionalStop || e.code === 4001) return;
           if (isRecording) {
             attemptReconnect();
@@ -507,14 +529,10 @@
       }
 
       function attemptReconnect() {
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-          setStatus('Connection lost', 'error');
-          stopRecording();
-          return;
-        }
         reconnectAttempts++;
+        // Backoff: 1s, 2s, 4s, 8s, then stay at 8s forever
         const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 8000);
-        setStatus(`Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`, '');
+        setStatus(`Reconnecting (attempt ${reconnectAttempts})...`, '');
         reconnectTimer = setTimeout(connectWebSocket, delay);
       }
 
@@ -564,6 +582,7 @@
         btnMic.textContent = 'Start';
         btnMic.className = 'btn-start';
         setStatus('Ready', '');
+        stopHeartbeat();
         levelMeter.classList.remove('active');
 
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
