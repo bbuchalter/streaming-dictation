@@ -160,41 +160,14 @@ class StreamingDictation:
             allow_headers=["*"],
         )
 
-        KEYWORDS = [
-            # Names and honorifics
-            "Thich Nhat Hanh", "Thay", "Su Ong", "Su Co",
-            "Chan Khong", "Phap Huu", "Phap Linh", "Phap Dung",
-            # Places
-            "Plum Village", "Blue Cliff", "Deer Park", "Tu Hieu", "EIAB",
-            # Key concepts
-            "Interbeing", "Dharma", "Sangha", "Bodhichitta", "Tathata",
-            "Sunyata", "Prajnaparamita", "Dharmakaya", "Nirmanakaya",
-            # Practice terms
-            "Metta", "Karuna", "Mudita", "Upekkha",
-            "Vipassana", "Samatha", "Samadhi", "Jhana",
-            "Satipatthana", "Anapanasati",
-            # Buddhist terms
-            "Dukkha", "Anatta", "Anicca", "Nirvana", "Samsara", "Karma",
-            "Skandha", "Vedana", "Bodhisattva", "Avalokiteshvara",
-            # Sutras
-            "Heart Sutra", "Diamond Sutra", "Lotus Sutra",
-            # Practice
-            "Gatha", "Dharmacharya", "Touching the Earth", "Beginning Anew",
-            # Yogacara
-            "Alaya", "Manas", "Bija", "Vijnana",
-        ]
-
         def build_deepgram_url():
-            base = (
+            return (
                 "wss://api.deepgram.com/v1/listen"
                 "?model=nova-3"
                 "&language=en"
                 "&punctuate=true"
                 "&smart_format=true"
             )
-            for kw in KEYWORDS:
-                base += f"&keywords={kw}:2"
-            return base
 
         def polish_text(client, raw: str, context: str) -> str:
             if not raw.strip():
