@@ -75,15 +75,18 @@ class PolishModel:
             user_message = f"Previous context: {body.context}\nRaw transcription: {body.raw}\nReturn only the cleaned text, nothing else."
 
             def generate():
-                with self.client.messages.stream(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=256,
-                    system=SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": user_message}],
-                ) as stream:
-                    for text in stream.text_stream:
-                        if text:
-                            yield f"data: {text}\n\n"
+                try:
+                    with self.client.messages.stream(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=256,
+                        system=SYSTEM_PROMPT,
+                        messages=[{"role": "user", "content": user_message}],
+                    ) as stream:
+                        for text in stream.text_stream:
+                            if text:
+                                yield f"data: {text}\n\n"
+                except Exception:
+                    pass
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
