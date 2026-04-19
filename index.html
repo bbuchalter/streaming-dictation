@@ -235,12 +235,38 @@
       }
 
       // ── Auth ──
-      function authenticate() {
+      async function verifyToken(token) {
+        const resp = await fetch(MODAL_POLISH_URL + '/polish', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({ raw: '', context: '' }),
+        });
+        return resp.ok;
+      }
+
+      async function authenticate() {
         const token = passwordInput.value.trim();
         if (!token) return;
-        sessionToken = token;
-        sessionStorage.setItem('sessionToken', token);
-        showApp();
+        authSubmit.disabled = true;
+        authSubmit.textContent = 'Verifying...';
+        try {
+          const valid = await verifyToken(token);
+          if (valid) {
+            sessionToken = token;
+            sessionStorage.setItem('sessionToken', token);
+            showApp();
+          } else {
+            sessionStorage.removeItem('sessionToken');
+            authSubmit.textContent = 'Invalid password';
+            setTimeout(() => { authSubmit.textContent = 'Connect'; authSubmit.disabled = false; }, 2000);
+          }
+        } catch (err) {
+          authSubmit.textContent = 'Connection error';
+          setTimeout(() => { authSubmit.textContent = 'Connect'; authSubmit.disabled = false; }, 2000);
+        }
       }
 
       function showApp() {
@@ -254,8 +280,20 @@
         if (e.key === 'Enter') authenticate();
       });
 
+      // Auto-login: verify stored token is still valid
       if (sessionToken) {
-        showApp();
+        verifyToken(sessionToken).then((valid) => {
+          if (valid) {
+            showApp();
+          } else {
+            sessionStorage.removeItem('sessionToken');
+            sessionToken = '';
+          }
+        }).catch(() => {
+          // Can't reach Modal — show auth gate, don't auto-login
+          sessionStorage.removeItem('sessionToken');
+          sessionToken = '';
+        });
       }
 
       // ── Caption display ──
