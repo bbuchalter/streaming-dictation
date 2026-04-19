@@ -168,6 +168,32 @@
     .status.error {
       color: #dc2626;
     }
+
+    /* Audio level meter */
+    .level-meter {
+      display: none;
+      width: 60px;
+      height: 14px;
+      background: #222222;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .level-meter.active {
+      display: block;
+    }
+
+    .level-meter-fill {
+      height: 100%;
+      width: 0%;
+      background: #16a34a;
+      border-radius: 3px;
+      transition: width 0.08s ease-out, background-color 0.15s;
+    }
+
+    .level-meter-fill.loud {
+      background: #eab308;
+    }
   </style>
 </head>
 <body>
@@ -186,6 +212,7 @@
     <div class="toolbar" id="toolbar">
       <button class="btn-start" id="btnMic">Start</button>
       <span class="status" id="status">Ready</span>
+      <div class="level-meter" id="levelMeter"><div class="level-meter-fill" id="levelFill"></div></div>
       <button class="btn-clear" id="btnClear">Clear</button>
       <button class="btn-export" id="btnExport">Export</button>
       <div class="toolbar-spacer"></div>
@@ -215,6 +242,8 @@
       const btnMic = document.getElementById('btnMic');
       const btnClear = document.getElementById('btnClear');
       const btnExport = document.getElementById('btnExport');
+      const levelMeter = document.getElementById('levelMeter');
+      const levelFill = document.getElementById('levelFill');
       const btnFullscreen = document.getElementById('btnFullscreen');
       const btnSizeDown = document.getElementById('btnSizeDown');
       const btnSizeUp = document.getElementById('btnSizeUp');
@@ -446,6 +475,7 @@
         btnMic.textContent = 'Stop';
         btnMic.className = 'btn-stop';
         setStatus('Connecting...', '');
+        levelMeter.classList.add('active');
 
         audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
 
@@ -464,6 +494,8 @@
         btnMic.textContent = 'Start';
         btnMic.className = 'btn-start';
         setStatus('Ready', '');
+        levelMeter.classList.remove('active');
+        levelFill.style.width = '0%';
 
         if (revaiSocket && revaiSocket.readyState === WebSocket.OPEN) {
           revaiSocket.send('EOS');
@@ -500,6 +532,14 @@
             if (audioContext.state === 'suspended' || audioContext.state === 'closed') return;
 
             const inputData = e.inputBuffer.getChannelData(0);
+
+            // Update audio level meter
+            let sum = 0;
+            for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
+            const rms = Math.sqrt(sum / inputData.length);
+            const pct = Math.min(100, rms * 400);
+            levelFill.style.width = pct + '%';
+            levelFill.classList.toggle('loud', pct > 70);
 
             // Convert float32 [-1, 1] to PCM S16LE
             const output = new DataView(new ArrayBuffer(inputData.length * 2));
