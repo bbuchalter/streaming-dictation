@@ -2,20 +2,20 @@
 
 ## Overview
 
-A web-based closed-captioning app for live Buddhist Dharma talks. A speaker runs the app on a dedicated screen visible to the audience. The browser captures mic audio, streams it to Rev.ai for speech-to-text, buffers the raw transcript, sends it through a self-hosted LLM on Modal for vocabulary polish, and displays the polished captions.
+A web-based closed-captioning app for live Buddhist Dharma talks. A speaker runs the app on a dedicated screen visible to the audience. The browser captures mic audio, streams it to Rev.ai for speech-to-text, buffers the raw transcript, sends it through Claude Haiku (via a thin Modal proxy) for vocabulary polish, and displays the polished captions.
 
 The UI reuses the existing `~/workspace/caption` project — large white text on a black background with fullscreen, font sizing, clear, and export controls.
 
 ## Architecture
 
 ```
-Browser                        Rev.ai                Modal (LLM Polish)
+Browser                        Rev.ai                Modal (API Proxy)
 ┌────────────────┐        ┌──────────────┐       ┌──────────────────┐
 │                │        │              │       │                  │
 │  Mic ──────────┼──WS───▶│  Streaming   │       │  POST /polish    │
 │  (continuous)  │        │  STT         │       │       │          │
-│                │        │  (Reverb)    │       │  Mistral 7B      │
-│                │◀──WS───│              │       │  (Q4 quantized)  │
+│                │        │  (Reverb)    │       │  Claude Haiku    │
+│                │◀──WS───│              │       │  (Anthropic API) │
 │  Buffer finals │        └──────────────┘       │       │          │
 │       │        │                               │  SSE response    │
 │       ▼        │                               │  (token stream)  │
@@ -32,7 +32,7 @@ Browser                        Rev.ai                Modal (LLM Polish)
 **Two external services, browser orchestrates:**
 
 1. **Rev.ai** — streaming speech-to-text via WebSocket
-2. **Modal** — LLM polish endpoint (Mistral 7B)
+2. **Modal** — thin API proxy that forwards polish requests to Claude Haiku (Anthropic API) and streams tokens back. No GPU, no self-hosted model.
 3. **Browser** — captures audio, connects to both services, displays polished captions
 
 There is no intermediate backend server. The browser talks directly to Rev.ai and Modal.
@@ -74,7 +74,7 @@ On first visit, the app shows a password field. The entered password is stored i
 - `Authorization: Bearer <token>` header on Modal requests
 - Rev.ai uses its own API token, stored as a constant in the client code (acceptable for personal use; the Rev.ai token is rate-limited and scoped to STT only)
 
-The session password prevents unauthorized Modal GPU usage. It persists across page reloads but clears when the tab is closed.
+The session password prevents unauthorized API usage via the Modal proxy. It persists across page reloads but clears when the tab is closed.
 
 ### Error Handling
 
@@ -102,9 +102,7 @@ Minimal client state:
 
 ### Model
 
-**Mistral 7B Instruct, Q4 quantized** (~5GB VRAM) on a T4 GPU (16GB VRAM). The model is downloaded at image build time via `Image.run_commands()`, not on cold start.
-
-No STT model is needed — Rev.ai handles that.
+**Claude Haiku** (`claude-haiku-4-5-20251001`) via the Anthropic Messages API. Modal acts as a thin proxy — no GPU, no self-hosted model. The endpoint validates the bearer token, forwards the request to the Anthropic API with streaming enabled, and relays tokens back as SSE.
 
 ### Endpoint: `POST /polish`
 
@@ -168,21 +166,23 @@ Return only the cleaned text, nothing else.
 1. Validate bearer token
 2. Parse JSON body (`raw` and `context`)
 3. If `raw` is empty, return empty SSE stream with `[DONE]`
-4. Format LLM prompt with raw transcript + context
-5. Run Mistral 7B inference with streaming output
-6. Stream tokens as SSE events
-7. Send `[DONE]` event
+4. Call `anthropic.Anthropic().messages.create()` with the system prompt, `raw`, `context`, `model="claude-haiku-4-5-20251001"`, and `stream=True`
+5. Iterate over stream events; for each `content_block_delta` with text, emit an SSE `data:` event
+6. Send `data: [DONE]` event
 
 ## Deployment & Operations
 
 ### Modal Configuration
 
-- Single `modal.py` file
-- GPU: T4 (16GB VRAM, ~$0.60/hr) — sufficient for Mistral 7B Q4 alone
-- Container timeout: 5 minutes idle before scale-to-zero
-- Concurrency: 1 (single speaker, sequential segments)
-- Model baked into image for fast cold starts (~2-3s)
-- One Modal secret: the bearer token
+- Single `modal_app.py` file
+- CPU-only (no GPU) — the endpoint is a thin proxy to the Anthropic API
+- Image: `debian_slim` + `anthropic` + `fastapi` (tiny, fast builds)
+- Container idle timeout: 60 seconds (cheap CPU, no reason to keep warm long)
+- Concurrency: 10 (no GPU contention, just HTTP forwarding)
+- Cold start: ~0.5s (just Python startup, no model loading)
+- Two Modal secrets:
+  - `streaming-dictation-auth` — bearer token for browser auth (existing)
+  - `streaming-dictation-anthropic` — Anthropic API key (new)
 
 ### Rev.ai Setup
 
@@ -200,19 +200,21 @@ Static files — serve from anywhere:
 
 ### Development Workflow
 
-- `modal serve modal.py` — local dev with hot reload for the LLM endpoint
-- `modal deploy modal.py` — production deployment
-- Edit system prompt in `modal.py` to update vocabulary corrections
+- `modal serve modal_app.py` — local dev with hot reload for the proxy endpoint
+- `modal deploy modal_app.py` — production deployment
+- Edit system prompt in `modal_app.py` to update vocabulary corrections
 - Update Rev.ai custom vocabulary via their REST API as needed
+- No model downloads, GPU provisioning, or image rebuilds for model changes — switching Claude model versions is a one-line config change
 
 ### Cost
 
 A 1-hour Dharma talk:
-- Rev.ai streaming STT: ~$0.20
-- Modal T4 GPU: ~$0.60
-- **Total: ~$0.80/hr**
+- Rev.ai streaming STT: ~$0.20/hr
+- Modal compute (CPU): ~$0.01/hr
+- Claude Haiku API: ~$0.01-0.02/hr (~10K tokens/hr)
+- **Total: ~$0.22/hr**
 
-Scales to zero between talks (Modal). Rev.ai is pay-per-use.
+Scales to zero between talks (Modal). Rev.ai and Claude API are pay-per-use.
 
 ### Latency Budget
 
@@ -220,12 +222,12 @@ Scales to zero between talks (Modal). Rev.ai is pay-per-use.
 |------|------|
 | Rev.ai streaming STT (to final) | ~0.5-1.0s after utterance |
 | Network: browser → Modal | ~0.1s |
-| Mistral 7B first token | ~0.3-0.5s |
-| Mistral 7B full response (~50 tokens) | ~1.0-1.5s |
-| **Total: utterance to first polished word** | **~1.0-1.5s** |
-| **Total: utterance to full polished segment** | **~2.0-3.0s** |
+| Claude Haiku first token | ~0.1-0.2s |
+| Claude Haiku full response (~50 tokens) | ~0.3-0.5s |
+| **Total: utterance to first polished word** | **~0.7-1.3s** |
+| **Total: utterance to full polished segment** | **~1.0-1.7s** |
 
-First request adds ~2-3s for Modal cold start.
+First request adds ~0.5s for Modal cold start (CPU-only container, no model loading).
 
 ## Out of Scope
 
@@ -245,10 +247,10 @@ First request adds ~2-3s for Modal cold start.
 | Audio format | PCM 16-bit 16kHz mono |
 | STT service | Rev.ai Reverb (streaming WebSocket) |
 | STT custom vocab | Rev.ai custom vocabulary (up to 6,000 phrases) |
-| LLM model | Mistral 7B Instruct (Q4 quantized) |
+| LLM model | Claude Haiku (`claude-haiku-4-5-20251001`) via Anthropic API |
 | LLM transport | HTTP POST → SSE response |
-| GPU platform | Modal (T4) |
-| Auth (GPU) | Bearer token (shared secret) |
+| LLM proxy | Modal (CPU-only, no GPU) |
+| Auth (proxy) | Bearer token (shared secret) |
 | Auth (STT) | Rev.ai API token |
 | Frontend | Vanilla HTML/CSS/JS (single file) |
 | Hosting (frontend) | Static file server |
