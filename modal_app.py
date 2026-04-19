@@ -166,7 +166,6 @@ class StreamingDictation:
                 "&language=en"
                 "&punctuate=true"
                 "&smart_format=true"
-                "&utterance_end_ms=1000"
             )
 
         def polish_text(client, raw: str, context: str) -> str:
@@ -207,7 +206,7 @@ class StreamingDictation:
                     additional_headers={"Authorization": f"Token {deepgram_key}"},
                 )
             except Exception as e:
-                await ws.send_json({"type": "error", "data": f"Deepgram connection failed: {e}"})
+                await ws.send_json({"type": "error", "data": f"Deepgram connection failed: {type(e).__name__}: {e}"})
                 await ws.close()
                 return
 
