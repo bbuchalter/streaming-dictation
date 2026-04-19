@@ -132,7 +132,7 @@ TIBETAN TERMS:
     secrets=[
         modal.Secret.from_name("streaming-dictation-auth"),
         modal.Secret.from_name("streaming-dictation-anthropic"),
-        modal.Secret.from_name("streaming-dictation-revai"),
+        modal.Secret.from_name("streaming-dictation-deepgram"),
     ],
     scaledown_window=60,
 )
@@ -159,17 +159,15 @@ class StreamingDictation:
             allow_headers=["*"],
         )
 
-        def build_revai_url():
-            params = {
-                "access_token": os.environ["REVAI_ACCESS_TOKEN"],
-                "content_type": "audio/webm;codecs=opus",
-                "remove_disfluencies": "true",
-            }
-            vocab_id = os.environ.get("REVAI_VOCAB_ID", "")
-            if vocab_id:
-                params["custom_vocabulary_id"] = vocab_id
-            query = "&".join(f"{k}={v}" for k, v in params.items())
-            return f"wss://api.rev.ai/speechtotext/v1/stream?{query}"
+        def build_deepgram_url():
+            return (
+                "wss://api.deepgram.com/v1/listen"
+                "?model=nova-3"
+                "&language=en"
+                "&punctuate=true"
+                "&smart_format=true"
+                "&utterance_end_ms=1000"
+            )
 
         def polish_text(client, raw: str, context: str) -> str:
             if not raw.strip():
@@ -200,26 +198,20 @@ class StreamingDictation:
                 await ws.close(code=4001, reason="Unauthorized")
                 return
 
-            # Connect to Rev.ai
-            revai_url = build_revai_url()
+            # Connect to Deepgram
+            deepgram_url = build_deepgram_url()
+            deepgram_key = os.environ["DEEPGRAM_API_KEY"]
             try:
-                revai_ws = await websockets.connect(revai_url)
+                stt_ws = await websockets.connect(
+                    deepgram_url,
+                    additional_headers={"Authorization": f"Token {deepgram_key}"},
+                )
             except Exception as e:
-                await ws.send_json({"type": "error", "data": f"Rev.ai connection failed: {e}"})
+                await ws.send_json({"type": "error", "data": f"Deepgram connection failed: {e}"})
                 await ws.close()
                 return
 
-            # Wait for Rev.ai connected message
-            try:
-                init_msg = await asyncio.wait_for(revai_ws.recv(), timeout=10)
-                init_data = json.loads(init_msg)
-                if init_data.get("type") == "connected":
-                    await ws.send_json({"type": "status", "data": "listening"})
-            except Exception:
-                await ws.send_json({"type": "error", "data": "Rev.ai handshake failed"})
-                await ws.close()
-                await revai_ws.close()
-                return
+            await ws.send_json({"type": "status", "data": "listening"})
 
             context = ""
             browser_done = asyncio.Event()
@@ -231,9 +223,9 @@ class StreamingDictation:
                         if data["type"] == "websocket.disconnect":
                             break
                         if "bytes" in data and data["bytes"]:
-                            await revai_ws.send(data["bytes"])
+                            await stt_ws.send(data["bytes"])
                         elif "text" in data and data["text"] == "EOS":
-                            await revai_ws.send("EOS")
+                            await stt_ws.send(json.dumps({"type": "CloseStream"}))
                             browser_done.set()
                             break
                 except WebSocketDisconnect:
@@ -244,20 +236,20 @@ class StreamingDictation:
             async def process_transcripts():
                 nonlocal context
                 try:
-                    async for message in revai_ws:
+                    async for message in stt_ws:
                         msg = json.loads(message)
-                        if msg.get("type") == "final":
-                            raw_text = "".join(
-                                el.get("value", "") for el in msg.get("elements", [])
-                            )
-                            if raw_text.strip():
-                                polished = await asyncio.to_thread(
-                                    polish_text, self.client, raw_text, context
-                                )
-                                if polished:
-                                    await ws.send_json({"type": "text", "data": polished})
-                                    words = polished.split()
-                                    context = " ".join(words[-50:])
+                        if msg.get("type") == "Results" and msg.get("is_final"):
+                            alternatives = msg.get("channel", {}).get("alternatives", [])
+                            if alternatives:
+                                raw_text = alternatives[0].get("transcript", "")
+                                if raw_text.strip():
+                                    polished = await asyncio.to_thread(
+                                        polish_text, self.client, raw_text, context
+                                    )
+                                    if polished:
+                                        await ws.send_json({"type": "text", "data": polished})
+                                        words = polished.split()
+                                        context = " ".join(words[-50:])
                 except websockets.exceptions.ConnectionClosed:
                     if not browser_done.is_set():
                         try:
@@ -271,7 +263,7 @@ class StreamingDictation:
                 await asyncio.gather(forward_audio(), process_transcripts())
             finally:
                 try:
-                    await revai_ws.close()
+                    await stt_ws.close()
                 except Exception:
                     pass
 
