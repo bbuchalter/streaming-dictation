@@ -1,3 +1,5 @@
+import asyncio
+import json
 import modal
 
 app = modal.App("streaming-dictation")
@@ -5,6 +7,7 @@ app = modal.App("streaming-dictation")
 image = modal.Image.debian_slim(python_version="3.11").pip_install(
     "anthropic",
     "fastapi",
+    "websockets",
 )
 
 SYSTEM_PROMPT = """You are a transcription editor for live Buddhist Dharma talks in the Plum Village tradition of Thich Nhat Hanh.
@@ -129,71 +132,148 @@ TIBETAN TERMS:
     secrets=[
         modal.Secret.from_name("streaming-dictation-auth"),
         modal.Secret.from_name("streaming-dictation-anthropic"),
+        modal.Secret.from_name("streaming-dictation-revai"),
     ],
     scaledown_window=60,
 )
 @modal.concurrent(max_inputs=10)
-class PolishModel:
+class StreamingDictation:
     @modal.enter()
     def setup_client(self):
         import anthropic
-
         self.client = anthropic.Anthropic()
 
     @modal.asgi_app()
     def web(self):
         import os
-        from fastapi import FastAPI, HTTPException, Request
+        import websockets
+        from fastapi import FastAPI, WebSocket, WebSocketDisconnect
         from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import StreamingResponse
-        from pydantic import BaseModel
 
         web_app = FastAPI()
 
         web_app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
-            allow_methods=["POST", "OPTIONS"],
-            allow_headers=["Authorization", "Content-Type"],
+            allow_methods=["*"],
+            allow_headers=["*"],
         )
 
-        class PolishRequest(BaseModel):
-            raw: str
-            context: str = ""
+        def build_revai_url():
+            params = {
+                "access_token": os.environ["REVAI_ACCESS_TOKEN"],
+                "content_type": "audio/webm;codecs=opus",
+                "remove_disfluencies": "true",
+            }
+            vocab_id = os.environ.get("REVAI_VOCAB_ID", "")
+            if vocab_id:
+                params["custom_vocabulary_id"] = vocab_id
+            query = "&".join(f"{k}={v}" for k, v in params.items())
+            return f"wss://api.rev.ai/speechtotext/v1/stream?{query}"
 
-        @web_app.post("/polish")
-        async def polish(request: Request, body: PolishRequest):
+        def polish_text(client, raw: str, context: str) -> str:
+            if not raw.strip():
+                return ""
+            user_message = (
+                f"Previous context: {context}\n"
+                f"Raw transcription: {raw}\n"
+                f"Return only the cleaned text, nothing else."
+            )
+            try:
+                response = client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=256,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": user_message}],
+                )
+                return response.content[0].text
+            except Exception:
+                return ""
+
+        @web_app.websocket("/stream")
+        async def stream(ws: WebSocket):
+            # Auth
+            token = ws.query_params.get("token", "")
             expected = os.environ["BEARER_TOKEN"]
-            auth = request.headers.get("Authorization", "")
-            if auth != f"Bearer {expected}":
-                raise HTTPException(status_code=401, detail="Unauthorized")
+            if token != expected:
+                await ws.close(code=4001, reason="Unauthorized")
+                return
 
-            if not body.raw.strip():
-                def empty():
-                    yield "data: [DONE]\n\n"
-                return StreamingResponse(empty(), media_type="text/event-stream")
+            await ws.accept()
 
-            user_message = f"Previous context: {body.context}\nRaw transcription: {body.raw}\nReturn only the cleaned text, nothing else."
+            # Connect to Rev.ai
+            revai_url = build_revai_url()
+            try:
+                revai_ws = await websockets.connect(revai_url)
+            except Exception as e:
+                await ws.send_json({"type": "error", "data": f"Rev.ai connection failed: {e}"})
+                await ws.close()
+                return
 
-            def generate():
+            # Wait for Rev.ai connected message
+            try:
+                init_msg = await asyncio.wait_for(revai_ws.recv(), timeout=10)
+                init_data = json.loads(init_msg)
+                if init_data.get("type") == "connected":
+                    await ws.send_json({"type": "status", "data": "listening"})
+            except Exception:
+                await ws.send_json({"type": "error", "data": "Rev.ai handshake failed"})
+                await ws.close()
+                await revai_ws.close()
+                return
+
+            context = ""
+            browser_done = asyncio.Event()
+
+            async def forward_audio():
                 try:
-                    with self.client.messages.stream(
-                        model="claude-haiku-4-5-20251001",
-                        max_tokens=256,
-                        system=SYSTEM_PROMPT,
-                        messages=[{"role": "user", "content": user_message}],
-                    ) as stream:
-                        for text in stream.text_stream:
-                            if text:
-                                yield f"data: {text}\n\n"
+                    while True:
+                        data = await ws.receive()
+                        if data["type"] == "websocket.disconnect":
+                            break
+                        if "bytes" in data and data["bytes"]:
+                            await revai_ws.send(data["bytes"])
+                        elif "text" in data and data["text"] == "EOS":
+                            await revai_ws.send("EOS")
+                            browser_done.set()
+                            break
+                except WebSocketDisconnect:
+                    pass
                 except Exception:
                     pass
-                yield "data: [DONE]\n\n"
 
-            return StreamingResponse(
-                generate(),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-            )
+            async def process_transcripts():
+                nonlocal context
+                try:
+                    async for message in revai_ws:
+                        msg = json.loads(message)
+                        if msg.get("type") == "final":
+                            raw_text = "".join(
+                                el.get("value", "") for el in msg.get("elements", [])
+                            )
+                            if raw_text.strip():
+                                polished = await asyncio.to_thread(
+                                    polish_text, self.client, raw_text, context
+                                )
+                                if polished:
+                                    await ws.send_json({"type": "text", "data": polished})
+                                    words = polished.split()
+                                    context = " ".join(words[-50:])
+                except websockets.exceptions.ConnectionClosed:
+                    if not browser_done.is_set():
+                        try:
+                            await ws.send_json({"type": "status", "data": "disconnected"})
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            try:
+                await asyncio.gather(forward_audio(), process_transcripts())
+            finally:
+                try:
+                    await revai_ws.close()
+                except Exception:
+                    pass
 
         return web_app
