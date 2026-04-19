@@ -192,14 +192,13 @@ class StreamingDictation:
 
         @web_app.websocket("/stream")
         async def stream(ws: WebSocket):
-            # Auth
+            # Auth — must accept before we can close with a code
+            await ws.accept()
             token = ws.query_params.get("token", "")
             expected = os.environ["BEARER_TOKEN"]
             if token != expected:
                 await ws.close(code=4001, reason="Unauthorized")
                 return
-
-            await ws.accept()
 
             # Connect to Rev.ai
             revai_url = build_revai_url()
