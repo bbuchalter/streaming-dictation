@@ -225,12 +225,12 @@
   <script>
     (function () {
       // ── Config ──
-      const REVAI_ACCESS_TOKEN = '020Ukq9BiI9c7k51wPFDoWe605MGfnfttjZtNzJYpQvo6LPH0716RSzvu0Ae-fcnLYL277Ur5IqCUDRRqMdqbfqLFxLAQ';
-      const REVAI_VOCAB_ID = 'cvYcI4aq3Y9rngiSht';
-      const MODAL_POLISH_URL = 'https://bbuchalter--streaming-dictation-polishmodel-web.modal.run';
+      const MODAL_WS_URL = 'wss://bbuchalter--streaming-dictation-streamingdictation-web.modal.run';
 
       const BUFFER_LIMIT = 5000;
       const STORAGE_KEY = 'dictation-transcript';
+      const MAX_RECONNECT_ATTEMPTS = 3;
+      const AUDIO_BUFFER_MAX = 40; // ~10 seconds at 250ms chunks
 
       // ── DOM ──
       const authGate = document.getElementById('authGate');
@@ -252,8 +252,17 @@
       // ── State ──
       let sessionToken = sessionStorage.getItem('sessionToken') || '';
       let isRecording = false;
-      let currentContext = '';
       let transcript = localStorage.getItem(STORAGE_KEY) || '';
+      let ws = null;
+      let mediaRecorder = null;
+      let micStream = null;
+      let audioCtx = null;
+      let analyser = null;
+      let levelRAF = null;
+      let audioBuffer = [];
+      let reconnectAttempts = 0;
+      let reconnectTimer = null;
+      let intentionalStop = false;
 
       // ── Font size ──
       const SIZES = [3, 4, 5, 6, 7, 8, 10];
@@ -263,24 +272,19 @@
         document.documentElement.style.setProperty('--caption-size', SIZES[sizeIndex] + 'vw');
       }
 
-      // ── Auth ──
-      async function verifyToken(token) {
-        const resp = await fetch(MODAL_POLISH_URL + '/polish', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`,
-          },
-          body: JSON.stringify({ raw: '', context: '' }),
-        });
-        return resp.ok;
+      // ── Status ──
+      function setStatus(text, cls) {
+        statusEl.textContent = text;
+        statusEl.className = 'status' + (cls ? ' ' + cls : '');
       }
 
+      // ── Auth ──
       async function authenticate() {
         const token = passwordInput.value.trim();
         if (!token) return;
         authSubmit.disabled = true;
         authSubmit.textContent = 'Verifying...';
+
         try {
           const valid = await verifyToken(token);
           if (valid) {
@@ -298,6 +302,27 @@
         }
       }
 
+      function verifyToken(token) {
+        return new Promise((resolve) => {
+          const testWs = new WebSocket(MODAL_WS_URL + '/stream?token=' + encodeURIComponent(token));
+          testWs.onmessage = (e) => {
+            try {
+              const msg = JSON.parse(e.data);
+              if (msg.type === 'status' && msg.data === 'listening') {
+                testWs.send('EOS');
+                testWs.close();
+                resolve(true);
+              }
+            } catch (_) {}
+          };
+          testWs.onclose = (e) => {
+            if (e.code === 4001) resolve(false);
+          };
+          testWs.onerror = () => resolve(false);
+          setTimeout(() => { testWs.close(); resolve(false); }, 10000);
+        });
+      }
+
       function showApp() {
         authGate.style.display = 'none';
         appEl.style.display = 'flex';
@@ -309,20 +334,11 @@
         if (e.key === 'Enter') authenticate();
       });
 
-      // Auto-login: verify stored token is still valid
       if (sessionToken) {
         verifyToken(sessionToken).then((valid) => {
-          if (valid) {
-            showApp();
-          } else {
-            sessionStorage.removeItem('sessionToken');
-            sessionToken = '';
-          }
-        }).catch(() => {
-          // Can't reach Modal — show auth gate, don't auto-login
-          sessionStorage.removeItem('sessionToken');
-          sessionToken = '';
-        });
+          if (valid) showApp();
+          else { sessionStorage.removeItem('sessionToken'); sessionToken = ''; }
+        }).catch(() => { sessionStorage.removeItem('sessionToken'); sessionToken = ''; });
       }
 
       // ── Caption display ──
@@ -348,7 +364,6 @@
       btnClear.addEventListener('click', (e) => {
         e.stopPropagation();
         transcript = '';
-        currentContext = '';
         localStorage.removeItem(STORAGE_KEY);
         captionText.textContent = '';
       });
@@ -397,168 +412,125 @@
         if (sizeIndex < SIZES.length - 1) { sizeIndex++; applySize(); }
       });
 
-      // ── Status ──
-      function setStatus(text, cls) {
-        statusEl.textContent = text;
-        statusEl.className = 'status' + (cls ? ' ' + cls : '');
+      // ── Audio level meter via AnalyserNode ──
+      function startLevelMeter(stream) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+        function updateMeter() {
+          analyser.getByteFrequencyData(dataArray);
+          let sum = 0;
+          for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+          const avg = sum / dataArray.length;
+          const pct = Math.min(100, avg * 1.5);
+          levelFill.style.width = pct + '%';
+          levelFill.classList.toggle('loud', pct > 70);
+          levelRAF = requestAnimationFrame(updateMeter);
+        }
+        updateMeter();
       }
 
-      // ── Polish endpoint ──
-      async function polishText(raw) {
-        if (!raw.trim()) return;
+      function stopLevelMeter() {
+        if (levelRAF) { cancelAnimationFrame(levelRAF); levelRAF = null; }
+        if (audioCtx) { audioCtx.close(); audioCtx = null; }
+        analyser = null;
+        levelFill.style.width = '0%';
+      }
 
-        try {
-          const resp = await fetch(MODAL_POLISH_URL + '/polish', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${sessionToken}`,
-            },
-            body: JSON.stringify({ raw, context: currentContext }),
-          });
+      // ── WebSocket connection ──
+      function connectWebSocket() {
+        ws = new WebSocket(MODAL_WS_URL + '/stream?token=' + encodeURIComponent(sessionToken));
 
-          if (!resp.ok) {
-            console.error('Polish failed:', resp.status);
-            appendText(raw);
-            return;
+        ws.onopen = () => {
+          reconnectAttempts = 0;
+          while (audioBuffer.length > 0) {
+            const chunk = audioBuffer.shift();
+            if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
           }
+        };
 
-          const reader = resp.body.getReader();
-          const decoder = new TextDecoder();
-          let polished = '';
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const text = decoder.decode(value, { stream: true });
-            const lines = text.split('\n');
-
-            for (const line of lines) {
-              if (!line.startsWith('data: ')) continue;
-              const data = line.slice(6);
-              if (data === '[DONE]') continue;
-              polished += data;
-              appendText(data);
+        ws.onmessage = (e) => {
+          try {
+            const msg = JSON.parse(e.data);
+            switch (msg.type) {
+              case 'status':
+                if (msg.data === 'listening') {
+                  setStatus('Listening...', 'listening');
+                } else if (msg.data === 'disconnected') {
+                  setStatus('Server reconnecting...', '');
+                }
+                break;
+              case 'text':
+                appendText(msg.data);
+                break;
+              case 'error':
+                console.error('Server error:', msg.data);
+                setStatus('Error: ' + msg.data, 'error');
+                break;
             }
+          } catch (_) {}
+        };
+
+        ws.onclose = (e) => {
+          if (intentionalStop || e.code === 4001) return;
+          if (isRecording) {
+            attemptReconnect();
           }
+        };
 
-          const words = polished.split(/\s+/);
-          currentContext = words.slice(-50).join(' ');
-        } catch (err) {
-          console.error('Polish error:', err);
-          appendText(raw);
-        }
+        ws.onerror = () => {};
       }
 
-      // ── Rev.ai Streaming ──
-      let audioContext = null;
-      let revaiSocket = null;
-      let scriptNode = null;
-      let micStream = null;
-
-      function buildRevaiUrl() {
-        const params = new URLSearchParams({
-          access_token: REVAI_ACCESS_TOKEN,
-          content_type: `audio/x-raw;layout=interleaved;rate=16000;format=S16LE;channels=1`,
-          remove_disfluencies: 'true',
-        });
-        if (REVAI_VOCAB_ID) {
-          params.set('custom_vocabulary_id', REVAI_VOCAB_ID);
+      function attemptReconnect() {
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+          setStatus('Connection lost', 'error');
+          stopRecording();
+          return;
         }
-        return `wss://api.rev.ai/speechtotext/v1/stream?${params}`;
+        reconnectAttempts++;
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 8000);
+        setStatus(`Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`, '');
+        reconnectTimer = setTimeout(connectWebSocket, delay);
       }
 
+      // ── Recording ──
       function startRecording() {
         if (isRecording) return;
         isRecording = true;
+        intentionalStop = false;
+        reconnectAttempts = 0;
+        audioBuffer = [];
         btnMic.textContent = 'Stop';
         btnMic.className = 'btn-stop';
         setStatus('Connecting...', '');
         levelMeter.classList.add('active');
 
-        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-
-        revaiSocket = new WebSocket(buildRevaiUrl());
-        revaiSocket.onopen = onRevaiOpen;
-        revaiSocket.onclose = onRevaiClose;
-        revaiSocket.onmessage = onRevaiMessage;
-        revaiSocket.onerror = (e) => {
-          console.error('Rev.ai WebSocket error:', e);
-          setStatus('Connection error', 'error');
-        };
-      }
-
-      function stopRecording() {
-        isRecording = false;
-        btnMic.textContent = 'Start';
-        btnMic.className = 'btn-start';
-        setStatus('Ready', '');
-        levelMeter.classList.remove('active');
-        levelFill.style.width = '0%';
-
-        if (revaiSocket && revaiSocket.readyState === WebSocket.OPEN) {
-          revaiSocket.send('EOS');
-          revaiSocket.close();
-        }
-        revaiSocket = null;
-
-        if (scriptNode) {
-          scriptNode.disconnect();
-          scriptNode = null;
-        }
-
-        if (micStream) {
-          micStream.getTracks().forEach(t => t.stop());
-          micStream = null;
-        }
-
-        if (audioContext) {
-          audioContext.close();
-          audioContext = null;
-        }
-      }
-
-      function onRevaiOpen() {
-        setStatus('Listening...', 'listening');
-
         navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
           micStream = stream;
-          const source = audioContext.createMediaStreamSource(stream);
-          scriptNode = audioContext.createScriptProcessor(4096, 1, 1);
+          startLevelMeter(stream);
 
-          scriptNode.addEventListener('audioprocess', (e) => {
-            if (!revaiSocket || revaiSocket.readyState !== WebSocket.OPEN) return;
-            if (audioContext.state === 'suspended' || audioContext.state === 'closed') return;
-
-            const inputData = e.inputBuffer.getChannelData(0);
-
-            // Update audio level meter
-            let sum = 0;
-            for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
-            const rms = Math.sqrt(sum / inputData.length);
-            const pct = Math.min(100, rms * 400);
-            levelFill.style.width = pct + '%';
-            levelFill.classList.toggle('loud', pct > 70);
-
-            // Convert float32 [-1, 1] to PCM S16LE
-            const output = new DataView(new ArrayBuffer(inputData.length * 2));
-            for (let i = 0; i < inputData.length; i++) {
-              const multiplier = inputData[i] < 0 ? 0x8000 : 0x7fff;
-              output.setInt16(i * 2, (inputData[i] * multiplier) | 0, true);
-            }
-
-            // Trim trailing silence
-            const intData = new Int16Array(output.buffer);
-            let end = intData.length;
-            while (end > 0 && intData[end - 1] === 0) { end--; }
-            if (end > 0) {
-              revaiSocket.send(intData.slice(0, end));
-            }
+          mediaRecorder = new MediaRecorder(stream, {
+            mimeType: 'audio/webm;codecs=opus',
+            audioBitsPerSecond: 24000,
           });
 
-          source.connect(scriptNode);
-          scriptNode.connect(audioContext.destination);
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size === 0) return;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(e.data);
+            } else {
+              audioBuffer.push(e.data);
+              if (audioBuffer.length > AUDIO_BUFFER_MAX) audioBuffer.shift();
+            }
+          };
+
+          mediaRecorder.start(250);
+          connectWebSocket();
         }).catch((err) => {
           console.error('Mic access denied:', err);
           setStatus('Mic access denied', 'error');
@@ -566,34 +538,34 @@
         });
       }
 
-      function onRevaiClose(event) {
-        if (isRecording) {
-          setStatus(`Disconnected (${event.code})`, 'error');
-          stopRecording();
+      function stopRecording() {
+        intentionalStop = true;
+        isRecording = false;
+        btnMic.textContent = 'Start';
+        btnMic.className = 'btn-start';
+        setStatus('Ready', '');
+        levelMeter.classList.remove('active');
+
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+          mediaRecorder.stop();
         }
-      }
+        mediaRecorder = null;
 
-      function onRevaiMessage(event) {
-        const data = JSON.parse(event.data);
-
-        switch (data.type) {
-          case 'connected':
-            setStatus('Listening...', 'listening');
-            break;
-
-          case 'partial':
-            break;
-
-          case 'final':
-            const text = data.elements
-              .map(el => el.value)
-              .join('');
-
-            if (text.trim()) {
-              polishText(text);
-            }
-            break;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send('EOS');
+          ws.close();
         }
+        ws = null;
+
+        if (micStream) {
+          micStream.getTracks().forEach(t => t.stop());
+          micStream = null;
+        }
+
+        stopLevelMeter();
+        audioBuffer = [];
       }
 
       // ── Mic button ──
