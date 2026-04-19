@@ -46,8 +46,36 @@ MAHAYANA TERMS (this tradition uses Sanskrit over Pali):
 - Bodhisattvas: "Avalokiteshvara", "Manjushri", "Samantabhadra", "Kshitigarbha", "Sadaparibhuta", "Maitreya"
 
 YOGACARA/CONSCIOUSNESS TERMS:
-- "Alaya" or "Alaya Vijnana" (store consciousness)
-- "Manas" (grasping mind), "Bija" (seeds), "Vijnana" (consciousness)
+- 8 consciousnesses: cakshur (eye), shrotra (ear), ghrana (nose), jihva (tongue), kaya (body), mano-vijnana (mind/6th), klishta-manovijnana (defiled mental/7th), alaya-vijnana (store/8th)
+- "Alaya" or "Alaya Vijnana" (store consciousness), "Manas" (grasping mind), "Bija" (seeds)
+- Three natures: "Parikalpita" (imagined), "Paratantra" (dependent), "Parinishpanna" (consummate)
+- "Ashraya-paravrtti" (transformation at the base), "Vasana" (habit energy)
+- "Cittamatra" (mind-only), "Vijnaptimatrata" (manifestation only), "Vijnanavada"
+
+51 MENTAL FORMATIONS (Caitta) — Vasubandhu's list, frequently taught by TNH:
+- Universal: Sparsha (contact), Manaskara (attention), Samjna (perception), Cetana (volition)
+- Wholesome: Shraddha (faith), Hri (self-respect), Apatrapya (decorum), Alobha, Advesha, Amoha, Prasrabdhi (tranquility), Apramada (conscientiousness), Ahimsa, Abhaya (non-fear)
+- Root afflictions: Klesha, Pratigha (anger), Mana (pride), Vicikitsa (doubt), Drishti (wrong view)
+- Secondary afflictions: Krodha (rage), Upanaha (resentment), Mraksha (concealment), Irshya (envy), Matsarya (miserliness), Styana (lethargy), Auddhatya (restlessness), Mushitasmritita (forgetfulness), Vikshepa (distraction)
+- Changeable: Kaukritya (regret), Middha (drowsiness), Vitarka (initial thought), Vichara (sustained thought)
+
+12 LINKS OF DEPENDENT ORIGINATION (Dvadasha Nidana):
+- Avidya/Avijja (ignorance), Samskara (formations), Vijnana (consciousness), Namarupa (name-and-form), Shadayatana/Salayatana (six sense bases), Sparsha/Phassa (contact), Vedana (feeling), Trishna/Tanha (craving), Upadana (clinging), Bhava (becoming), Jati (birth), Jaramarana (aging-and-death)
+
+PARAMITAS:
+- Six: Dana (generosity), Sila (ethics), Kshanti/Khanti (patience), Virya (energy), Dhyana (meditation), Prajna (wisdom)
+- Additional: Upaya (skillful means), Pranidhana (aspiration/vow), Bala (power), Jnana (knowledge)
+
+37 WINGS OF AWAKENING:
+- Satipatthana (four foundations), Sammappadhana (four right efforts), Iddhipada (four bases of power)
+- Indriya (five faculties), Bala (five powers), Bojjhanga (seven factors), Magganga (path factors)
+- Contemplations: Kayanupassana (body), Vedananupassana (feelings), Cittanupassana (mind), Dhammanupassana (dharmas)
+- Eightfold Path: Samma Ditthi, Samma Sankappa, Samma Vaca, Samma Kammanta, Samma Ajiva, Samma Vayama, Samma Sati, Samma Samadhi
+
+ABHIDHARMA:
+- "Abhidharma", "Abhidharmakosa" (Vasubandhu), "Abhidharmasamuccaya" (Asanga)
+- Samskrita (conditioned), Asamskrita (unconditioned), Hetu (cause), Pratyaya (condition), Phala (result)
+- "Dharma-lakshana" (characteristics), "Svabhava" (self-nature)
 
 CORE BUDDHIST TERMS (always capitalize):
 - Dharma, Sangha, Buddha, Sutra, Sutta, Vinaya
@@ -60,19 +88,40 @@ SUTRAS:
 - "Heart Sutra", "Diamond Sutra", "Lotus Sutra", "Avatamsaka Sutra"
 - "Anapanasati Sutta", "Satipatthana Sutta", "Bhaddekaratta Sutta"
 - "Lankavatara Sutra", "Vimalakirti Sutra", "Platform Sutra"
+- Key texts: "Trimsika" (Thirty Verses), "Vimsatika" (Twenty Verses), "Yogacharabhumi", "Mahayanasamgraha", "Bodhicharyavatara"
+
+SUTRA CHARACTERS:
+- Disciples: Shariputra, Mahakashyapa, Mahamaudgalyayana, Subhuti, Ananda, Rahula, Mahaprajapati, Yashodhara
+- Lotus Sutra: Prabhutaratna, Vishishtacharitra, Bhaishajyaraja, Gadgadasvara
+- Avatamsaka: Sudhana, Gandavyuha
 
 PRACTICE TERMS:
 - "Gatha/Gathas" (mindfulness poems), "Touching the Earth", "Beginning Anew"
 - "Dharma sharing", "Dharma rain", "Dharmacharya" (Dharma teacher)
 - "Inviting the Bell", "Noble Silence", "Lazy Day"
 - "Walking Meditation", "Sitting Meditation", "Deep Relaxation"
+- "Lamp Transmission", "Rains Retreat", "Pebble Meditation", "Flower Watering"
 
 COMMUNITY:
 - "Order of Interbeing" (Tiep Hien), "Parallax Press", "The Mindfulness Bell"
 - "Wake Up" (young practitioners), "ARISE Sangha", "Earth Holder Sangha"
 
+HISTORICAL FIGURES:
+- Asanga (Yogacara co-founder), Dignaga, Dharmakirti, Kumarajiva (translator)
+- Buddhaghosa, Bodhidharma, Zhiyi (Tiantai), Shantideva, Chandrakirti, Atisha, Milarepa
+
 VIETNAMESE TERMS:
-- "Thien" (Zen), "Lam Te" (Linji school), "Lieu Quan" (sub-lineage)"""
+- "Thien" (Zen), "Lam Te" (Linji school), "Lieu Quan" (sub-lineage)
+- "An Lac" (peace), "Chanh Niem" (right mindfulness), "Vo Thuong" (impermanence), "Vo Nga" (non-self)
+- "Bo Tat" (Bodhisattva), "Quan The Am" (Avalokiteshvara), "Tam Bao" (Three Jewels)
+- "Truc Lam" (Bamboo Forest school), "Cong Phu" (daily liturgy)
+
+JAPANESE ZEN TERMS:
+- Kinhin (walking meditation), Dokusan (private interview), Teisho (dharma talk)
+- Roshi (master), Zendo (hall), Zafu (cushion), Gassho (palms together), Mokugyo (wooden fish)
+
+TIBETAN TERMS:
+- Tonglen, Dzogchen, Rinpoche, Tulku, Bardo, Vajra, Vajrayana, Rigpa, Mahamudra"""
 
 
 @app.cls(
