@@ -1,62 +1,66 @@
 # Streaming Dictation
 
-Real-time closed captioning for live Buddhist Dharma talks. Captures mic audio in the browser, transcribes via Rev.ai, polishes transcripts through a self-hosted LLM on Modal, and displays polished captions on a fullscreen display.
+Real-time closed captioning for live Buddhist Dharma talks. A speaker runs the app on a dedicated screen visible to the audience. The browser captures mic audio, streams it to a server for speech-to-text, polishes the transcript with an LLM for correct terminology, and displays the captions word by word.
+
+**Live app:** https://bbuchalter.github.io/streaming-dictation/
+
+## How it works
+
+1. Browser captures mic audio as Opus (~24kbps) via MediaRecorder
+2. Audio streams over a single WebSocket to a Modal server
+3. Modal proxies the audio to Deepgram Nova-3 for speech-to-text
+4. Transcript segments are polished by Claude Haiku (punctuation, filler removal, Buddhist terminology correction)
+5. Polished text streams back to the browser word by word
+
+All API keys stay server-side. The browser only needs the Modal endpoint URL and a password.
 
 ## Architecture
 
 ```
-Browser ──WebSocket──▶ Rev.ai (streaming STT)
-                              │
-                        raw transcript
-                              │
-Browser ──HTTP POST──▶ Modal (Mistral 7B, LLM polish)
-                              │
-                        SSE polished tokens
-                              │
-Browser ◀─────────────────────┘
-         caption display
+Browser (Opus audio) ──WebSocket──> Modal (CPU proxy)
+                                      ├──> Deepgram Nova-3 (STT)
+                                      └──> Claude Haiku (polish)
+                    <──WebSocket──  polished text (JSON)
 ```
 
-## Setup
+## Usage
 
-### 1. Rev.ai Custom Vocabulary
+1. Open the app and enter the password
+2. Click **Start** to begin captioning
+3. Speak — polished captions appear in ~1-2 seconds
+4. Use **A-/A+** to adjust font size, **Fullscreen** for presentation
+5. Click **Export** to download the transcript as a text file
 
-The `create_vocabulary.py` script creates a custom vocabulary in Rev.ai so the STT engine better recognizes Buddhist/Pali/Sanskrit terminology (Dharma, Vipassana, Metta, Dukkha, etc.).
+## Development
 
-```bash
-REVAI_ACCESS_TOKEN=<your-token> python create_vocabulary.py
-```
+### Prerequisites
 
-This POSTs the phrase list to Rev.ai's REST API and prints a vocabulary ID. Update `REVAI_VOCAB_ID` in `index.html` with the returned ID.
+- [Modal](https://modal.com) account with CLI authenticated
+- Deepgram API key (stored as Modal secret `streaming-dictation-deepgram`)
+- Anthropic API key (stored as Modal secret `streaming-dictation-anthropic`)
+- Bearer token for auth (stored as Modal secret `streaming-dictation-auth`)
 
-To update the vocabulary later, edit the `PHRASES` list in the script, re-run it, and update the ID in `index.html`. Rev.ai supports up to 6,000 phrases.
-
-### 2. Modal LLM Endpoint
-
-Deploy the polish endpoint (Mistral 7B Q4 on a T4 GPU):
-
-```bash
-modal deploy modal_app.py
-```
-
-Update `MODAL_POLISH_URL` in `index.html` with the printed URL.
-
-The bearer token for auth is stored as a Modal secret (`streaming-dictation-auth`). To change it:
+### Local development
 
 ```bash
-modal secret create streaming-dictation-auth BEARER_TOKEN=<new-password>
-```
+# Run the Modal endpoint with hot reload
+python -m modal serve modal_app.py
 
-### 3. Run
-
-Serve the static files:
-
-```bash
+# Serve the frontend
 python -m http.server 8080
+# Open http://localhost:8080/index.html
 ```
 
-Open `http://localhost:8080`, enter the bearer token as the password, and click Start.
+### Deploy
+
+```bash
+# Deploy the Modal backend
+python -m modal deploy modal_app.py
+
+# Frontend is served via GitHub Pages (auto-deploys on push to main)
+git push origin main
+```
 
 ## Cost
 
-~$0.80/hr during a talk (Rev.ai $0.20/hr + Modal T4 $0.60/hr). Scales to zero between talks.
+~$0.30/hr for a live talk (Deepgram STT + Modal compute + Claude Haiku API).
