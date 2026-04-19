@@ -29,9 +29,9 @@ Rules:
         modal.Secret.from_name("streaming-dictation-auth"),
         modal.Secret.from_name("streaming-dictation-anthropic"),
     ],
-    container_idle_timeout=60,
-    allow_concurrent_inputs=10,
+    scaledown_window=60,
 )
+@modal.concurrent(max_inputs=10)
 class PolishModel:
     @modal.enter()
     def setup_client(self):
