@@ -19,6 +19,7 @@ Rules:
 - Preserve the speaker's words faithfully — do not restructure sentences
 - If a sentence is cut off at the end, include it as-is
 - Use the provided context for continuity — do not repeat words that were already in the previous segment
+- CRITICAL: Output ONLY the cleaned text. Never add commentary, explanations, or conversational responses. If the input is unclear, output your best guess at the cleaned text anyway.
 
 Correct Buddhist terminology using these guidelines:
 
@@ -172,9 +173,10 @@ class StreamingDictation:
             if not raw.strip():
                 return ""
             user_message = (
-                f"Previous context: {context}\n"
-                f"Raw transcription: {raw}\n"
-                f"Return only the cleaned text, nothing else."
+                f"<context>{context}</context>\n"
+                f"<raw>{raw}</raw>\n"
+                f"Output ONLY the cleaned version of the text in <raw>. "
+                f"No commentary, no explanations, no prefixes. Just the cleaned text."
             )
             try:
                 response = client.messages.create(
