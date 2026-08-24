@@ -45,13 +45,20 @@ def load_token():
     sys.exit("MODAL_BEARER_TOKEN not found or empty in .env")
 
 
-def http(url, method="GET", headers=None, timeout=90):
+def http(url, method="GET", headers=None, timeout=90, decode=True):
+    # decode=False is for callers that only care about the status code (e.g. the
+    # binary PNG icons in check_pages_sw_assets). .decode() raises
+    # UnicodeDecodeError on binary bodies, and the broad except below used to
+    # swallow that into a status of None -- turning a real 200 into a fake
+    # "unreachable" failure. Do not decode bodies you don't need.
     req = urllib.request.Request(url, method=method, headers=headers or {})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, {k.lower(): v for k, v in r.headers.items()}, r.read().decode()
+            body = r.read()
+            return r.status, {k.lower(): v for k, v in r.headers.items()}, body.decode() if decode else body
     except urllib.error.HTTPError as e:
-        return e.code, {k.lower(): v for k, v in e.headers.items()}, e.read().decode()
+        body = e.read()
+        return e.code, {k.lower(): v for k, v in e.headers.items()}, body.decode() if decode else body
     except Exception as e:
         return None, {}, f"{type(e).__name__}: {e}"
 
@@ -171,7 +178,8 @@ def check_pages_sw_assets():
     bad = []
     for p in paths:
         target = urllib.parse.urljoin(PAGES_BASE, p)
-        code, _, _ = http(target)
+        # decode=False: some assets (icons) are binary; only the status matters here.
+        code, _, _ = http(target, decode=False)
         if code != 200:
             bad.append(f"{p}->{code}")
     record("pages_sw_assets", not bad, f"{len(paths)} assets checked; failures: {bad or 'none'}")
