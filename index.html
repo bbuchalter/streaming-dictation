@@ -197,10 +197,17 @@
   </style>
 </head>
 <body>
+  <div id="upgradeBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:999;
+       background:#332900;color:#ffd24d;font-size:14px;padding:10px 14px;text-align:center">
+    A newer version of this page is available.
+    <button id="upgradeReload" style="margin-left:10px">Reload</button>
+  </div>
+
   <!-- Auth gate -->
   <div class="auth-gate" id="authGate">
     <input type="password" id="passwordInput" placeholder="Enter password" autofocus>
     <button id="authSubmit">Connect</button>
+    <span id="authVersion" style="font-size:10px;color:#555;margin-top:10px"></span>
   </div>
 
   <!-- Main app (hidden until authenticated) -->
@@ -219,7 +226,7 @@
       <button id="btnSizeDown">A-</button>
       <button id="btnSizeUp">A+</button>
       <button class="btn-fullscreen" id="btnFullscreen">Fullscreen</button>
-      <span style="font-size:10px;color:#555;margin-left:8px">v2026.04.19a</span>
+      <span id="toolbarVersion" style="font-size:10px;color:#555;margin-left:8px"></span>
     </div>
   </div>
 
@@ -229,6 +236,8 @@
       const MODAL_WS_URL = 'wss://bbuchalter--streaming-dictation-streamingdictation-web.modal.run';
       const MODAL_HTTP_URL = MODAL_WS_URL.replace(/^wss:/, 'https:');  // one source of truth
       const AUTH_TIMEOUT_MS = 20000;   // cold start measured at 3.9-5.0s; 10s was too tight
+      const CLIENT_EPOCH  = 2;                // integer, compared by code
+      const VERSION_LABEL = 'v2026.08.24a';   // string, shown to humans
 
       const BUFFER_LIMIT = 5000;
       const STORAGE_KEY = 'dictation-transcript';
@@ -311,10 +320,19 @@
         const timer = setTimeout(() => ctrl.abort(), AUTH_TIMEOUT_MS);
         try {
           const res = await fetch(MODAL_HTTP_URL + '/auth', {
-            headers: { Authorization: 'Bearer ' + token },
+            headers: {
+              Authorization: 'Bearer ' + token,
+              'X-Client-Version': String(CLIENT_EPOCH),
+            },
             signal: ctrl.signal,
           });
-          if (res.status === 200) return { ok: true };
+          if (res.status === 200) {
+            const body = await res.json().catch(() => ({}));
+            if (typeof body.min_client_epoch === 'number' && CLIENT_EPOCH < body.min_client_epoch) {
+              maybeOfferUpgrade(body.min_client_epoch);
+            }
+            return { ok: true };
+          }
           if (res.status === 401) return { ok: false, reason: 'Invalid password' };
           return { ok: false, reason: `Server error (HTTP ${res.status})` };
         } catch (e) {
@@ -329,11 +347,35 @@
         }
       }
 
+      function maybeOfferUpgrade(min) {
+        // Never interrupt a talk: a reload destroys the page, the MediaRecorder,
+        // and the WebSocket, ending an in-progress recording.
+        if (isRecording) return;
+        const key = 'upgradeOffered:' + min;
+        if (sessionStorage.getItem(key)) return;   // ask once, then stop
+        showUpgradeBanner(() => {
+          sessionStorage.setItem(key, '1');
+          // Explicit cache-bust: a bare reload can be served from a still-fresh
+          // max-age=600 entry, which would just show this banner again.
+          // Built from pathname so the query string does not accumulate.
+          location.replace(location.pathname + '?v=' + min);
+        });
+      }
+
+      function showUpgradeBanner(onReload) {
+        const banner = document.getElementById('upgradeBanner');
+        banner.style.display = 'block';
+        document.getElementById('upgradeReload').addEventListener('click', onReload, { once: true });
+      }
+
       function showApp() {
         authGate.style.display = 'none';
         appEl.style.display = 'flex';
         renderDisplay();
       }
+
+      document.getElementById('authVersion').textContent = VERSION_LABEL;
+      document.getElementById('toolbarVersion').textContent = VERSION_LABEL;
 
       authSubmit.addEventListener('click', authenticate);
       passwordInput.addEventListener('keydown', (e) => {
