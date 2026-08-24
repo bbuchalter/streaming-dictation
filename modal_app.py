@@ -4,6 +4,10 @@ import modal
 
 app = modal.App("streaming-dictation")
 
+# Clients older than this are asked to reload. Raise only after GitHub Pages is
+# confirmed serving the newer build — see the plan's Task 8.
+MIN_CLIENT_EPOCH = 1
+
 image = modal.Image.debian_slim(python_version="3.11").pip_install(
     "anthropic",
     "fastapi",
@@ -149,16 +153,29 @@ class StreamingDictation:
     def web(self):
         import os
         import websockets
-        from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+        import hmac
+        from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
         from fastapi.middleware.cors import CORSMiddleware
 
         web_app = FastAPI()
 
+        # Fail fast: web() runs once per container, so a missing or empty secret
+        # becomes a visible crash loop instead of a per-request KeyError raised
+        # after ws.accept() has already succeeded.
+        expected_token = os.environ["BEARER_TOKEN"]
+        if not expected_token.strip():
+            raise RuntimeError("BEARER_TOKEN is set but empty")
+
         web_app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
+            allow_origins=[
+                "https://bbuchalter.github.io",   # scheme+host only — never a path
+                "http://localhost:8000",          # python3 -m http.server, for testing client changes
+            ],
+            allow_methods=["GET"],
+            allow_headers=["Authorization", "X-Client-Version"],
+            allow_credentials=False,
+            max_age=600,
         )
 
         def build_deepgram_url():
@@ -189,6 +206,18 @@ class StreamingDictation:
                 return response.content[0].text
             except Exception:
                 return ""
+
+        @web_app.get("/auth")
+        def auth(
+            authorization: str = Header(default=""),
+            x_client_version: str = Header(default="?"),
+        ):
+            scheme, _, tok = authorization.partition(" ")
+            if scheme.lower() != "bearer" or not hmac.compare_digest(tok, expected_token):
+                print(f"auth rejected client_epoch={x_client_version}")
+                raise HTTPException(status_code=401, detail="invalid token")
+            print(f"auth ok client_epoch={x_client_version}")
+            return {"ok": True, "min_client_epoch": MIN_CLIENT_EPOCH}
 
         @web_app.websocket("/stream")
         async def stream(ws: WebSocket):
