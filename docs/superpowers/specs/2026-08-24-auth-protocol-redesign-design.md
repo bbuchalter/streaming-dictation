@@ -11,6 +11,10 @@ This design adds a cheap `GET /auth` endpoint for the login gate, moves the bear
 WebSocket URL and into the first frame of the connection, and gives the server distinct close codes
 so the client can tell "wrong password" from "upstream is broken."
 
+Because GitHub Pages caches `index.html` for 10 minutes and an already-open tab never re-fetches it
+at all, the server accepts both the old and new handshakes for a transition period. Deploying the
+server cannot break a client that has not reloaded.
+
 Scope is Group B of the twelve findings from the 2026-08-24 investigation: findings 1, 2, 7, 8, 9.
 Groups A, C, and D are explicitly out of scope (see the last section).
 
@@ -65,7 +69,7 @@ Browser                               Modal
 └──────────────────┘          └────────────────────────┘
 
 
-RECORDING (token moves out of the URL into the first frame)
+RECORDING (new clients send the token as the first frame; legacy query param still accepted)
 
 Browser                               Modal                      External
 ┌──────────────────┐          ┌────────────────────────┐
@@ -158,19 +162,27 @@ The `token` query parameter is removed. The first text frame carries the token.
 
 ```python
 await ws.accept()
-try:
-    first = await asyncio.wait_for(ws.receive(), timeout=10)
-except asyncio.TimeoutError:
-    await ws.close(code=4002, reason="Auth timeout")
-    return
 
-tok = first.get("text") if isinstance(first, dict) else None
-if tok is None:
-    await ws.close(code=4002, reason="Expected token as first text frame")
-    return
-if not hmac.compare_digest(tok, expected_token):
-    await ws.close(code=4001, reason="Unauthorized")
-    return
+# LEGACY PATH: token in the query parameter, for clients cached before this change.
+# See "Backward compatibility" below. Remove only once no stale client can remain.
+legacy = ws.query_params.get("token")
+if legacy is not None:
+    if not hmac.compare_digest(legacy, expected_token):
+        await ws.close(code=4001, reason="Unauthorized")
+        return
+else:
+    try:
+        first = await asyncio.wait_for(ws.receive(), timeout=10)
+    except asyncio.TimeoutError:
+        await ws.close(code=4002, reason="Auth timeout")
+        return
+    tok = first.get("text") if isinstance(first, dict) else None
+    if tok is None:
+        await ws.close(code=4002, reason="Expected token as first text frame")
+        return
+    if not hmac.compare_digest(tok, expected_token):
+        await ws.close(code=4001, reason="Unauthorized")
+        return
 
 await ws.send_json({"type": "status", "data": "authenticated"})
 ```
@@ -288,6 +300,8 @@ integration smoke test run against the deployed endpoint:
 | `/stream` with valid token as first frame | reaches `status: listening` |
 | `/stream` with wrong token | close `4001` |
 | `/stream` with no first frame | close `4002` within ~10s |
+| `/stream?token=<valid>` with no first frame (legacy client) | reaches `status: listening` |
+| `/stream?token=<wrong>` (legacy client) | close `4001` |
 
 The `/auth` checks fail with `404` against the server as it stands today, so this is genuinely
 test-first: write the checks, watch them fail, implement, watch them pass.
@@ -307,30 +321,73 @@ The script reads the token from `MODAL_BEARER_TOKEN` in `.env` (gitignored) and 
 
 ## Deployment & Operations
 
-The client (GitHub Pages, push-to-deploy) and the server (`modal deploy`) ship independently, and
-this changes the protocol on both sides. There is therefore a window in which they disagree.
+### Client cache behavior (measured 2026-08-24)
 
-Order:
+GitHub Pages serves `index.html` with `cache-control: max-age=600`, and Pages provides no way to set
+custom headers. That fixed 10-minute window governs how fast a client can pick up a new frontend:
 
-1. `modal deploy modal_app.py`
-2. `python3 check_login.py` — validates the new server before the client goes out
+| Client state | Picks up the new `index.html`? |
+|--------------|-------------------------------|
+| First visit, or HTTP cache expired | Yes, immediately |
+| Reload within 10 minutes of a prior load | No — served from the HTTP cache, up to 10 minutes stale |
+| Tab already open | **Never**, unbounded, until something triggers a reload |
+
+The last row is the operationally significant one. This is a captioning app left open on a screen for
+the length of a talk, so a long-lived tab running old JavaScript is the normal case rather than an
+edge case. The operator cannot be relied on to hard-refresh every client.
+
+The service worker is *not* a factor. All five entries in `ASSETS` (`service-worker.js:2`) are
+root-absolute and resolve against the Pages domain root rather than `/streaming-dictation/`; all five
+return 404, and no root Pages site exists. `cache.addAll()` therefore rejects, `install` fails, the
+worker never activates, and its `fetch` handler never intercepts a request. This changes once Group C
+fixes finding 10, at which point this section must be revisited — a working cache reintroduces
+staleness that only a network-first navigation strategy can bound.
+
+### Backward compatibility
+
+Because a stale client can persist indefinitely, the server accepts the bearer token from **either**
+the legacy `token` query parameter or the new first text frame. This is a requirement, not an
+optimization: without it, an old client against the new server reproduces the exact bug this design
+exists to remove.
+
+Failure mode if dual support were omitted: the old client connects with `?token=…` and then waits for
+messages. The new server waits 10 seconds for a first frame, receives nothing, and closes `4002`. The
+old client's `onclose` (`index.html:521-527`) returns early only for `4001`, so it falls through to
+its own 10-second timer and renders "Invalid password." An open tab that is mid-recording fares worse:
+`4002` is not `4001` and `isRecording` is true, so `attemptReconnect()` loops forever at 8-second
+intervals, silently, during a talk.
+
+Dual support is transparent to old clients:
+
+- The new `authenticated` status falls through both branches of the old client's `status` switch as a
+  no-op, because it matches neither `listening` nor `disconnected`.
+- `verifyToken()` still receives the `listening` message it waits for, so login continues to work.
+- The old `onopen` audio-buffer flush behaves exactly as it does today.
+
+An earlier draft of this spec rejected dual support under YAGNI, on the assumption that the operator
+controls when clients refresh. That assumption is false, and the rejection was wrong.
+
+### Deployment order
+
+1. `modal deploy modal_app.py` — the new server serves both client generations, so nothing breaks
+2. `python3 check_login.py` — validates both the new and the legacy paths against the deployed server
 3. Commit and push `index.html`
-4. Hard-refresh the browser tab
-
-The live page is broken between steps 1 and 3, roughly a minute. **Do not deploy during a talk.**
-
-This is safe from stale clients because the service worker currently caches nothing: `ASSETS` in
-`service-worker.js:2` lists root-absolute paths that 404 under `/streaming-dictation/`, so `addAll`
-rejects and installation fails. That is finding 10, fixed in Group C — after which this deployment
-order will need revisiting, because a working cache changes the stale-client analysis.
-
-Dual-protocol support on the server (accept the token from either the query parameter or the first
-frame) was considered and rejected under YAGNI. It would eliminate the window at the cost of about
-three lines plus a follow-up removal commit. Deploy timing is under the operator's control, and the
-operator is the only user.
+4. Reload any open tab at leisure; there is no forced-refresh requirement and no broken window
 
 The toolbar version label (`v2026.04.19a`, commit 339acd4) gets bumped so a glance at a tab reveals
-which client it is running.
+which client generation it is running. This is the only practical way to tell a stale tab from a
+current one.
+
+### Retiring the legacy path
+
+The legacy query-parameter branch is dead code once every client has reloaded, and it keeps the token
+in URLs (finding 7) for any client still using it. Retire it in a separate commit, gated on:
+
+- every device the operator uses has been reloaded and shows the bumped version label, and
+- no talk is in progress.
+
+Until that commit lands, finding 7 is only partially resolved: new clients keep the token out of the
+URL, legacy clients do not. This is a deliberate trade of complete hygiene for zero downtime.
 
 ## Cost
 
@@ -348,7 +405,7 @@ is unchanged.
 |---|---------|-----|
 | 1 | `verifyToken` reports every non-4001 failure as "Invalid password" | Deleted; HTTP status codes replace close-code inference |
 | 2 | 10-second login timeout is shorter than a cold start | 20s, plus a "Waking server…" indicator |
-| 7 | Bearer token travels in the URL query string | Moved to the first WebSocket frame and to an `Authorization` header |
+| 7 | Bearer token travels in the URL query string | Partial: new clients use the first WebSocket frame and an `Authorization` header; the legacy query-param branch stays until retired (see Deployment) |
 | 8 | `os.environ["BEARER_TOKEN"]` read inside the request handler | Read and validated at container construction |
 | 9 | Login check opens a billable Deepgram session | `GET /auth` touches no upstream service |
 
