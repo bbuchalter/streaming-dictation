@@ -86,7 +86,7 @@ def check_auth_preflight(_tok):
     )
     acao = hdrs.get("access-control-allow-origin", "")
     acah = hdrs.get("access-control-allow-headers", "").lower()
-    ok = st == 200 and acao in (PAGES_ORIGIN, "*") and "authorization" in acah and "x-client-version" in acah
+    ok = st == 200 and acao == PAGES_ORIGIN and "authorization" in acah and "x-client-version" in acah
     record("http_auth_preflight", ok, f"status={st} ACAO={acao!r} ACAH={acah!r}")
 
 
@@ -110,17 +110,16 @@ async def ws_probe(url, first_frame, recv_timeout):
         async with websockets.connect(url, open_timeout=120) as ws:
             if first_frame is not None:
                 await ws.send(first_frame)
-            try:
-                while True:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
-                    msg = json.loads(raw)
-                    if msg.get("type") == "status" and msg.get("data") == "listening":
-                        await ws.send("EOS")
-                        return "listening", None
-            except websockets.ConnectionClosed as e:
-                return "closed", e.code
-            except asyncio.TimeoutError:
-                return "error", "recv timeout"
+            while True:
+                raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+                msg = json.loads(raw)
+                if msg.get("type") == "status" and msg.get("data") == "listening":
+                    await ws.send("EOS")
+                    return "listening", None
+    except websockets.ConnectionClosed as e:
+        return "closed", e.code
+    except asyncio.TimeoutError:
+        return "error", "recv timeout"
     except Exception as e:
         return "error", f"{type(e).__name__}: {e}"
 
