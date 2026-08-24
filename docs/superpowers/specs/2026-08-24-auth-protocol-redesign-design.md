@@ -118,9 +118,23 @@ This lives in `web()` rather than `@modal.enter()` for two reasons: `web()` is w
 
 ### CORS
 
-```python
-from fastapi.middleware.cors import CORSMiddleware
+`CORSMiddleware` is **already installed**, at `modal_app.py:157-162`, and already imported at
+`modal_app.py:153`:
 
+```python
+web_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+The wildcards mean `Authorization` and `X-Client-Version` preflights would already succeed, since
+Starlette echoes the requested headers when `allow_headers=["*"]`. **No CORS change is strictly
+required for `/auth` to work.** This is a tightening, not an enablement:
+
+```python
 web_app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://bbuchalter.github.io"],  # scheme+host only — never a path
@@ -131,6 +145,10 @@ web_app.add_middleware(
 )
 ```
 
+Worth doing because it is free and narrows the surface, but it buys hygiene rather than security —
+see the note on CORS being browser-enforced under Threat model. It is also the one change in this
+design that could *break* `/auth` if the origin string is wrong, so the smoke test covers it.
+
 Every argument is load-bearing against Starlette 1.6.0 defaults (`allow_origins=()`,
 `allow_methods=('GET',)`, `allow_headers=()`, `allow_credentials=False`):
 
@@ -140,8 +158,8 @@ Every argument is load-bearing against Starlette 1.6.0 defaults (`allow_origins=
   This is the cost of keeping the token out of the URL.
 - `allow_credentials=False` — authentication uses a header, not a cookie.
 
-No image change is required: `fastapi` is already installed (`modal_app.py:9`) and
-`fastapi.middleware.cors.CORSMiddleware` re-exports Starlette's.
+No image change and no new import are required: `fastapi` is already installed (`modal_app.py:9`) and
+`CORSMiddleware` is already imported (`modal_app.py:153`).
 
 Verified against a deployed throwaway Modal app: Modal's proxy passes `OPTIONS` through to the ASGI
 app with no Modal-specific configuration, and — critically — Starlette attaches
