@@ -343,6 +343,40 @@ worker never activates, and its `fetch` handler never intercepts a request. This
 fixes finding 10, at which point this section must be revisited — a working cache reintroduces
 staleness that only a network-first navigation strategy can bound.
 
+### Installed PWA clients
+
+The app is installable: `manifest.json` declares `name`, `short_name`, `start_url: "."`,
+`display: standalone`, and 192/512 icons, all over HTTPS. Note the contrast with the service worker —
+the manifest uses *relative* paths, so they resolve correctly against `/streaming-dictation/`, while
+`ASSETS` uses root-absolute paths and does not. The PWA is fine; only the caching is broken.
+
+An installed PWA is still an ordinary browser context, so launching it navigates to `start_url` and
+that navigation goes through the HTTP cache. A cold launch more than 10 minutes after the last one
+therefore picks up new code. Two things make PWA clients the *worst* case for staleness anyway:
+
+1. **Launching often resumes rather than navigates.** On iOS and Android, reopening an installed app
+   commonly restores a backgrounded instance, which keeps the old JavaScript in memory indefinitely.
+   This is the open-tab problem without a visible tab to suggest closing.
+2. **`display: standalone` removes the address bar and the reload button.** A user in a stale
+   standalone window has no obvious way to force a refresh, so the population least able to
+   self-remediate is also the population most likely to be stale.
+
+Measured on the live site in a real browser: `navigator.serviceWorker.getRegistrations()` returns an
+empty array and `navigator.serviceWorker.controller` is `null`, so no worker is active and no fetch
+interception occurs. The `dictation-v1` cache *does* exist but is empty — `caches.open()` in the
+`install` handler succeeds before `cache.addAll(ASSETS)` rejects. So today there is no service-worker
+layer of staleness on top of the HTTP cache.
+
+Installed PWAs are consequently the strongest argument for the dual-protocol support described below,
+not an exception to it.
+
+**Hazard for Group C.** Fixing the `ASSETS` paths without also fixing the caching strategy is
+materially worse for installed PWAs than the status quo. `service-worker.js:12` is cache-first with no
+invalidation against a static `CACHE_NAME`, so a working install would strand a standalone window on
+the first `index.html` it ever cached — permanently, with no address bar to escape through. Group C
+must use a network-first strategy for navigation requests, and should pair a versioned cache name with
+`skipWaiting()` and `clients.claim()`.
+
 ### Backward compatibility
 
 Because a stale client can persist indefinitely, the server accepts the bearer token from **either**
@@ -374,9 +408,14 @@ controls when clients refresh. That assumption is false, and the rejection was w
 3. Commit and push `index.html`
 4. Reload any open tab at leisure; there is no forced-refresh requirement and no broken window
 
-The toolbar version label (`v2026.04.19a`, commit 339acd4) gets bumped so a glance at a tab reveals
-which client generation it is running. This is the only practical way to tell a stale tab from a
-current one.
+The toolbar version label (`v2026.04.19a`, commit 339acd4) gets bumped so a glance reveals which
+client generation a tab or window is running.
+
+It also has to **move**. The label sits at `index.html:222`, inside `<div id="app">`, which is
+`display: none` until a login succeeds (`index.html:207`, revealed at `index.html:329-330`). A stale
+client that cannot log in therefore cannot show its version — exactly the situation where the version
+is the thing you need. The label must also render on the auth gate (`index.html:201`), where it is
+visible before authentication.
 
 ### Retiring the legacy path
 
