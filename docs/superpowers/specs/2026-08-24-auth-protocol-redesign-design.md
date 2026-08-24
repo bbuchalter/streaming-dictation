@@ -15,8 +15,9 @@ Because GitHub Pages caches `index.html` for 10 minutes and an already-open tab 
 at all, the server accepts both the old and new handshakes for a transition period. Deploying the
 server cannot break a client that has not reloaded.
 
-Scope is Group B of the twelve findings from the 2026-08-24 investigation: findings 1, 2, 7, 8, 9.
-Groups A, C, and D are explicitly out of scope (see the last section).
+Scope is Group B of the twelve findings from the 2026-08-24 investigation: findings 1, 2, 7, 8, 9,
+plus a client version handshake that makes staleness observable and self-correcting. Groups A, C,
+and D are explicitly out of scope (see the last section).
 
 ## Background: the incident this comes from
 
@@ -119,7 +120,7 @@ web_app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://bbuchalter.github.io"],  # scheme+host only — never a path
     allow_methods=["GET"],
-    allow_headers=["Authorization"],
+    allow_headers=["Authorization", "X-Client-Version"],
     allow_credentials=False,
     max_age=600,
 )
@@ -130,8 +131,8 @@ Every argument is load-bearing against Starlette 1.6.0 defaults (`allow_origins=
 
 - `allow_origins` — an origin is scheme plus host. A path suffix silently matches nothing.
 - `allow_headers` — the CORS safelist is `{Accept, Accept-Language, Content-Language, Content-Type}`.
-  `Authorization` is not in it, so omitting this breaks the preflight. This is the cost of keeping
-  the token out of the URL.
+  Neither `Authorization` nor `X-Client-Version` is in it, so omitting either breaks the preflight.
+  This is the cost of keeping the token out of the URL.
 - `allow_credentials=False` — authentication uses a header, not a cookie.
 
 No image change is required: `fastapi` is already installed (`modal_app.py:9`) and
@@ -146,15 +147,35 @@ would block JS from reading the status and a wrong password would surface as
 ### Endpoint: `GET /auth`
 
 ```python
+MIN_CLIENT_EPOCH = 1   # raise only after Pages is confirmed serving the newer build
+
 @web_app.get("/auth")
-def auth(authorization: str = Header(default="")):
+def auth(
+    authorization: str = Header(default=""),
+    x_client_version: str = Header(default="?"),
+):
     scheme, _, tok = authorization.partition(" ")
     if scheme.lower() != "bearer" or not hmac.compare_digest(tok, expected_token):
+        print(f"auth rejected client_epoch={x_client_version}")
         raise HTTPException(status_code=401, detail="invalid token")
-    return {"ok": True}
+    print(f"auth ok client_epoch={x_client_version}")
+    return {"ok": True, "min_client_epoch": MIN_CLIENT_EPOCH}
 ```
 
 No Deepgram connection, no Anthropic client use, no WebSocket. The only cost is a container wake.
+
+The `print` calls land in `modal app logs`, which is what makes client staleness observable at all.
+
+**Why a *minimum* epoch and not the current one.** The deployment order deploys the server before
+pushing the client, so for a period the server is newer than what GitHub Pages serves. If the server
+advertised "the current version is N" while Pages still served N-1, every client — including healthy
+ones — would see a mismatch, reload, receive N-1 again, and reload forever. Advertising a floor that
+is raised only after Pages is confirmed updated makes that loop structurally impossible.
+
+**Why an integer epoch and not the version string.** `MIN_CLIENT_EPOCH` is a monotonically increasing
+integer so the comparison is unambiguous. Comparing `v2026.08.24a`-style labels lexicographically
+happens to work today but silently breaks the first time the format changes or a suffix passes `z`.
+The human-readable label stays for display; the epoch is what code compares.
 
 ### WebSocket `/stream` handshake
 
@@ -256,6 +277,75 @@ re-verification on page load (`index.html:339`).
 While the request is in flight, the button shows "Waking server…" after roughly 2 seconds so a cold
 start does not read as a hang.
 
+### Version handshake and upgrade prompt
+
+The client carries two constants: an integer epoch for comparison and a label for humans.
+
+```javascript
+const CLIENT_EPOCH  = 2;                // bump on every client change that matters
+const VERSION_LABEL = 'v2026.08.24a';   // display only
+```
+
+`checkAuth` sends the epoch and reads the server's floor:
+
+```javascript
+const res = await fetch(MODAL_HTTP_URL + '/auth', {
+  headers: { Authorization: 'Bearer ' + token, 'X-Client-Version': String(CLIENT_EPOCH) },
+  signal: ctrl.signal,
+});
+// on 200:
+const body = await res.json().catch(() => ({}));
+if (typeof body.min_client_epoch === 'number' && CLIENT_EPOCH < body.min_client_epoch) {
+  maybeOfferUpgrade(body.min_client_epoch);
+}
+```
+
+```javascript
+function maybeOfferUpgrade(min) {
+  if (isRecording) return;                          // never interrupt a talk
+  const key = 'upgradeOffered:' + min;
+  if (sessionStorage.getItem(key)) return;          // one attempt, then stop asking
+  showUpgradeBanner(() => {
+    sessionStorage.setItem(key, '1');
+    location.replace(location.pathname + '?v=' + min);
+  });
+}
+```
+
+Three deliberate constraints:
+
+- **Never auto-reload.** A reload destroys the page, the `MediaRecorder`, and the WebSocket. Firing
+  one mid-talk would end an in-progress recording, which is strictly worse than running stale code.
+  The banner is an offer, and it is suppressed entirely while `isRecording`.
+- **Cache-bust explicitly.** A bare `location.reload()` can be served from a still-fresh
+  `max-age=600` entry, which would present the banner again immediately. `?v=<epoch>` guarantees a
+  network fetch. Building it from `location.pathname` rather than `location.href` keeps the query
+  string from accumulating across successive upgrades.
+- **One attempt per epoch.** The `sessionStorage` guard means that even if the floor is raised before
+  Pages is updated — operator error the min-epoch design already guards against — a client offers the
+  reload once and then stops, rather than looping.
+
+#### What this does not solve
+
+This mechanism is invisible to the clients that are stale *right now*. Today's client authenticates
+over the WebSocket and never requests `/auth`, so it never receives `min_client_epoch`. The banner
+protects against future staleness; it cannot participate in this transition.
+
+For the current transition there are two levers:
+
+1. **Observability.** A legacy query-parameter handshake is itself proof of a stale client. The server
+   logs it, so `modal app logs` answers "is anything old still out there?" without any client
+   cooperation. This is what turns the legacy-branch retirement gate from a guess into a check.
+2. **The one channel old clients do read.** An old client renders any `{"type": "error"}` frame
+   through `setStatus` (`index.html:513-515`). The server can therefore send a plain-text upgrade
+   notice to legacy-handshake connections and it will appear on screen. The wart is cosmetic: the old
+   client prefixes it with "Error: ". The tradeoff is that it overwrites the status line for the rest
+   of a talk, so it is recommended but easy to omit — a legacy client is by definition already in the
+   state we want corrected, and the captions, not the status line, are what matter during a talk.
+
+Manual remediation of the operator's own handful of devices remains the primary path for this one
+transition. The logs tell you if you missed one.
+
 ### Recording handshake
 
 `onopen` currently flushes `audioBuffer` immediately (`index.html:489-500`). New behavior: `onopen`
@@ -302,6 +392,8 @@ integration smoke test run against the deployed endpoint:
 | `/stream` with no first frame | close `4002` within ~10s |
 | `/stream?token=<valid>` with no first frame (legacy client) | reaches `status: listening` |
 | `/stream?token=<wrong>` (legacy client) | close `4001` |
+| `GET /auth` with `X-Client-Version` below the floor | `200` with `min_client_epoch` above the sent value |
+| `OPTIONS /auth` preflight requesting `X-Client-Version` | `200`, header listed in `Access-Control-Allow-Headers` |
 
 The `/auth` checks fail with `404` against the server as it stands today, so this is genuinely
 test-first: write the checks, watch them fail, implement, watch them pass.
@@ -403,10 +495,19 @@ controls when clients refresh. That assumption is false, and the rejection was w
 
 ### Deployment order
 
-1. `modal deploy modal_app.py` — the new server serves both client generations, so nothing breaks
+1. `modal deploy modal_app.py` with `MIN_CLIENT_EPOCH` left at its current value — the new server
+   serves both client generations, so nothing breaks
 2. `python3 check_login.py` — validates both the new and the legacy paths against the deployed server
-3. Commit and push `index.html`
-4. Reload any open tab at leisure; there is no forced-refresh requirement and no broken window
+3. Commit and push `index.html` with `CLIENT_EPOCH` incremented
+4. Confirm `https://bbuchalter.github.io/streaming-dictation/` actually serves the new build. GitHub
+   Pages caches for 600 seconds, so this is not immediate; check the version label on the auth gate
+5. Only then raise `MIN_CLIENT_EPOCH` to the new value and `modal deploy` again. This arms the upgrade
+   banner. Doing it before step 4 is what the min-epoch design and the `sessionStorage` guard exist to
+   survive, but the ordering avoids relying on either
+6. Watch `modal app logs` for legacy handshakes and for `client_epoch` values below the floor
+
+There is no forced-refresh requirement and no window in which the app is broken. Steps 5 and 6 are
+about closing out staleness, not about restoring service.
 
 The toolbar version label (`v2026.04.19a`, commit 339acd4) gets bumped so a glance reveals which
 client generation a tab or window is running.
@@ -420,10 +521,17 @@ visible before authentication.
 ### Retiring the legacy path
 
 The legacy query-parameter branch is dead code once every client has reloaded, and it keeps the token
-in URLs (finding 7) for any client still using it. Retire it in a separate commit, gated on:
+in URLs (finding 7) for any client still using it. Retire it in a separate commit, gated on an
+observable condition rather than an assumption:
 
-- every device the operator uses has been reloaded and shows the bumped version label, and
-- no talk is in progress.
+- `modal app logs` shows no legacy query-parameter handshake over a window that plausibly covers every
+  installed PWA and long-lived tab — a few weeks of normal use, including at least one talk, and
+- no talk is in progress at the moment of the deploy.
+
+An earlier draft gated this on "every device has been reloaded and shows the bumped version label,"
+which is not checkable: installed PWA instances cannot be enumerated, and a backgrounded standalone
+window can resume weeks later. Without server-side logging of the handshake generation, the legacy
+branch would have become permanent by default and finding 7 would have stayed partial forever.
 
 Until that commit lands, finding 7 is only partially resolved: new clients keep the token out of the
 URL, legacy clients do not. This is a deliberate trade of complete hygiene for zero downtime.
