@@ -6,7 +6,7 @@ app = modal.App("streaming-dictation")
 
 # Clients older than this are asked to reload. Raise only after GitHub Pages is
 # confirmed serving the newer build — see the plan's Task 8.
-MIN_CLIENT_EPOCH = 1
+MIN_CLIENT_EPOCH = 2
 
 # Seconds /stream waits for the token as its first text frame. This is what
 # bounds how much of the function timeout below (10800s) a client that connects
