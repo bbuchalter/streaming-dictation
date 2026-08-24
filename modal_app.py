@@ -8,8 +8,11 @@ app = modal.App("streaming-dictation")
 # confirmed serving the newer build — see the plan's Task 8.
 MIN_CLIENT_EPOCH = 1
 
-# Seconds /stream waits for the token as its first text frame. Named rather than
-# inlined so it is greppable against the timeout=7200 below that it bounds.
+# Seconds /stream waits for the token as its first text frame. This is what
+# bounds how much of the function timeout below (10800s) a client that connects
+# and then says nothing can pin: without it, one silent socket holds a container
+# and a @modal.concurrent slot for the full three hours. Named rather than
+# inlined so the pair stays greppable together.
 AUTH_TIMEOUT_SECONDS = 10
 
 image = modal.Image.debian_slim(python_version="3.11").pip_install(
@@ -144,7 +147,12 @@ TIBETAN TERMS:
         modal.Secret.from_name("streaming-dictation-deepgram"),
     ],
     scaledown_window=60,
-    timeout=7200,  # 2 hours — long enough for a full Dharma talk
+    # 3 hours. The clock starts when the operator presses Start, which is before
+    # the talk begins — mic checks, waiting for the room to settle, a false start.
+    # Sized at exactly the expected two hours it had no margin at all, and the
+    # failure it aimed at was the socket dying during the closing minutes.
+    # AUTH_TIMEOUT_SECONDS above is what keeps a silent client from pinning this.
+    timeout=10800,
 )
 @modal.concurrent(max_inputs=10)
 class StreamingDictation:
@@ -258,7 +266,8 @@ class StreamingDictation:
                     first = await asyncio.wait_for(ws.receive(), timeout=AUTH_TIMEOUT_SECONDS)
                 except asyncio.TimeoutError:
                     # Without this, a client that connects and says nothing pins a
-                    # container for the full 7200s function timeout.
+                    # container for the whole function timeout. See
+                    # AUTH_TIMEOUT_SECONDS: the number lives there, once.
                     await ws.close(code=4002, reason="Auth timeout")
                     return
                 if isinstance(first, dict) and first.get("type") == "websocket.disconnect":
