@@ -8,6 +8,10 @@ app = modal.App("streaming-dictation")
 # confirmed serving the newer build — see the plan's Task 8.
 MIN_CLIENT_EPOCH = 1
 
+# Seconds /stream waits for the token as its first text frame. Named rather than
+# inlined so it is greppable against the timeout=7200 below that it bounds.
+AUTH_TIMEOUT_SECONDS = 10
+
 image = modal.Image.debian_slim(python_version="3.11").pip_install(
     "anthropic",
     "fastapi",
@@ -165,6 +169,21 @@ class StreamingDictation:
         expected_token = os.environ["BEARER_TOKEN"]
         if not expected_token.strip():
             raise RuntimeError("BEARER_TOKEN is set but empty")
+        # The client sends passwordInput.value.trim(), and the comparison below is
+        # exact. A secret stored with a trailing newline (echo adds one; so does
+        # copy-paste) would therefore reject every correct password with a crisp
+        # "Invalid password." Crash loudly at startup instead of lying per login.
+        if expected_token != expected_token.strip():
+            raise RuntimeError("BEARER_TOKEN has leading or trailing whitespace")
+
+        # Same treatment for the Deepgram key. Read inside the handler it raised
+        # KeyError after accept(), after auth and after the client had been told
+        # "authenticated" — no error frame, close 1011, reconnect forever: the exact
+        # undiagnosable shape of the incident this work exists to remove, for the
+        # very upstream that caused it.
+        deepgram_key = os.environ["DEEPGRAM_API_KEY"]
+        if not deepgram_key.strip():
+            raise RuntimeError("DEEPGRAM_API_KEY is set but empty")
 
         web_app.add_middleware(
             CORSMiddleware,
@@ -236,7 +255,7 @@ class StreamingDictation:
                 print("stream auth ok via legacy query param — stale client")
             else:
                 try:
-                    first = await asyncio.wait_for(ws.receive(), timeout=10)
+                    first = await asyncio.wait_for(ws.receive(), timeout=AUTH_TIMEOUT_SECONDS)
                 except asyncio.TimeoutError:
                     # Without this, a client that connects and says nothing pins a
                     # container for the full 7200s function timeout.
@@ -257,7 +276,6 @@ class StreamingDictation:
 
             # Connect to Deepgram
             deepgram_url = build_deepgram_url()
-            deepgram_key = os.environ["DEEPGRAM_API_KEY"]
             try:
                 stt_ws = await websockets.connect(
                     deepgram_url,
