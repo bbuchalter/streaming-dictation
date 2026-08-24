@@ -223,11 +223,41 @@ class StreamingDictation:
         async def stream(ws: WebSocket):
             # Auth — must accept before we can close with a code
             await ws.accept()
-            token = ws.query_params.get("token", "")
-            expected = os.environ["BEARER_TOKEN"]
-            if token != expected:
-                await ws.close(code=4001, reason="Unauthorized")
-                return
+
+            # LEGACY PATH: token in the query parameter. Clients cached before this
+            # change send it this way, and an installed PWA can stay stale
+            # indefinitely, so this branch cannot be removed on a deploy boundary.
+            # Retire it only per the spec's "Retiring the legacy path" gate.
+            legacy = ws.query_params.get("token")
+            if legacy is not None:
+                if not hmac.compare_digest(legacy, expected_token):
+                    await ws.close(code=4001, reason="Unauthorized")
+                    return
+                print("stream auth ok via legacy query param — stale client")
+                await ws.send_json({
+                    "type": "error",
+                    "data": "This page is out of date — please reload it.",
+                })
+            else:
+                try:
+                    first = await asyncio.wait_for(ws.receive(), timeout=10)
+                except asyncio.TimeoutError:
+                    # Without this, a client that connects and says nothing pins a
+                    # container for the full 7200s function timeout.
+                    await ws.close(code=4002, reason="Auth timeout")
+                    return
+                if isinstance(first, dict) and first.get("type") == "websocket.disconnect":
+                    return
+                tok = first.get("text") if isinstance(first, dict) else None
+                if tok is None:
+                    await ws.close(code=4002, reason="Expected token as first text frame")
+                    return
+                if not hmac.compare_digest(tok, expected_token):
+                    await ws.close(code=4001, reason="Unauthorized")
+                    return
+                print("stream auth ok via first frame")
+
+            await ws.send_json({"type": "status", "data": "authenticated"})
 
             # Connect to Deepgram
             deepgram_url = build_deepgram_url()
@@ -239,7 +269,11 @@ class StreamingDictation:
                 )
             except Exception as e:
                 await ws.send_json({"type": "error", "data": f"Deepgram connection failed: {type(e).__name__}: {e}"})
-                await ws.close()
+                # 4003 = upstream permanently failed. A revoked key is not fixed by
+                # retrying. Today's client still reconnects on this code; Group A
+                # finding 6 teaches it to stop. The error frame above is what makes
+                # the real cause visible in the meantime.
+                await ws.close(code=4003, reason="Upstream unavailable")
                 return
 
             await ws.send_json({"type": "status", "data": "listening"})
