@@ -336,11 +336,12 @@
             }
             return { ok: true };
           }
-          if (res.status === 401) return { ok: false, reason: 'Invalid password' };
-          return { ok: false, reason: `Server error (HTTP ${res.status})` };
+          if (res.status === 401) return { ok: false, status: 401, reason: 'Invalid password' };
+          return { ok: false, status: res.status, reason: `Server error (HTTP ${res.status})` };
         } catch (e) {
           return {
             ok: false,
+            status: 0,   // never reached the server: this says nothing about the token
             reason: e.name === 'AbortError'
               ? 'Timed out waking the server — try again'
               : 'Network error: ' + e.message,
@@ -368,7 +369,15 @@
       function showUpgradeBanner(onReload) {
         const banner = document.getElementById('upgradeBanner');
         banner.style.display = 'block';
-        document.getElementById('upgradeReload').addEventListener('click', onReload, { once: true });
+        // Assignment, not addEventListener: a second offer replaces the handler
+        // instead of stacking another one behind it.
+        document.getElementById('upgradeReload').onclick = () => {
+          // Re-check where the action happens, not only where it was offered. A
+          // stray tap during a talk would otherwise reload the page and destroy
+          // the MediaRecorder and the WebSocket mid-recording.
+          if (isRecording) return;
+          onReload();
+        };
       }
 
       function showApp() {
@@ -387,8 +396,17 @@
 
       if (sessionToken) {
         checkAuth(sessionToken).then((result) => {
-          if (result.ok) showApp();
-          else { sessionStorage.removeItem('sessionToken'); sessionToken = ''; }
+          if (result.ok) { showApp(); return; }
+          // Only a genuine 401 means the cached token is bad. A 5xx, a timeout or
+          // venue wifi must not discard working credentials — and the operator
+          // needs to be told which of them happened, on the login path that runs
+          // most often. Showing nothing here was the branch's own thesis unapplied.
+          if (result.status === 401) {
+            sessionStorage.removeItem('sessionToken');
+            sessionToken = '';
+          }
+          authSubmit.textContent = result.reason;
+          setTimeout(() => { authSubmit.textContent = 'Connect'; }, 3000);
         });
       }
 
@@ -632,6 +650,10 @@
       // ── Recording ──
       function startRecording() {
         if (isRecording) return;
+        // The banner is position:fixed and outside #app, so showApp() does not
+        // hide it. Left up, it is a yellow bar across a projected caption screen
+        // for the length of the talk, with a live Reload button in it.
+        document.getElementById('upgradeBanner').style.display = 'none';
         isRecording = true;
         intentionalStop = false;
         reconnectAttempts = 0;
