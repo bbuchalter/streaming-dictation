@@ -59,14 +59,27 @@ def http(url, method="GET", headers=None, timeout=90):
 # ---------------- Modal endpoint checks ----------------
 
 def check_auth_valid(tok):
-    st, _, body = http(f"{HTTP_BASE}/auth", headers={"Authorization": f"Bearer {tok}",
-                                                    "X-Client-Version": "2"})
-    record("http_auth_valid", st == 200, f"expected 200, got {st} ({body[:80]})")
+    st, hdrs, body = http(f"{HTTP_BASE}/auth", headers={"Authorization": f"Bearer {tok}",
+                                                       "X-Client-Version": "2",
+                                                       "Origin": PAGES_ORIGIN})
+    acao = hdrs.get("access-control-allow-origin")
+    ok = st == 200 and acao == PAGES_ORIGIN
+    record("http_auth_valid", ok, f"expected 200 + ACAO, got {st} ACAO={acao!r} ({body[:60]})")
 
 
 def check_auth_wrong(_tok):
-    st, _, _ = http(f"{HTTP_BASE}/auth", headers={"Authorization": f"Bearer {WRONG}"})
-    record("http_auth_wrong", st == 401, f"expected 401, got {st}")
+    # The Origin header is the point of this check. Without
+    # Access-Control-Allow-Origin on the 401, the browser blocks JS from reading
+    # the status and a wrong password surfaces as "TypeError: Failed to fetch" —
+    # the original masking bug in a new form, which the design names as its most
+    # dangerous regression. urllib does not enforce CORS, so unless the header is
+    # asserted here nothing covers it. Note this is the exception-handler path,
+    # not the OPTIONS path that check_auth_preflight covers.
+    st, hdrs, _ = http(f"{HTTP_BASE}/auth", headers={"Authorization": f"Bearer {WRONG}",
+                                                    "Origin": PAGES_ORIGIN})
+    acao = hdrs.get("access-control-allow-origin")
+    ok = st == 401 and acao == PAGES_ORIGIN
+    record("http_auth_wrong", ok, f"expected 401 + ACAO, got {st} ACAO={acao!r}")
 
 
 def check_auth_missing(_tok):
