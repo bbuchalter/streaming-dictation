@@ -263,6 +263,7 @@
       let analyser = null;
       let levelRAF = null;
       let audioBuffer = [];
+      let wsReady = false; // true only between the 'listening' status and close/reconnect
       let reconnectAttempts = 0;
       let reconnectTimer = null;
       let heartbeatTimer = null;
@@ -486,7 +487,20 @@
       }
 
       // ── WebSocket connection ──
+      // audioBuffer is the single source of truth for outgoing audio: every
+      // chunk from MediaRecorder goes in, and flushAudio() is the only place
+      // that ever calls ws.send() for audio. That keeps chunks strictly
+      // ordered — a second send site (e.g. sending live chunks straight
+      // through whenever the socket happens to be OPEN) can race the flush
+      // and deliver a newer chunk before older ones still waiting in the
+      // buffer, corrupting the WebM container sent to Deepgram.
+      function flushAudio() {
+        if (!wsReady || !ws || ws.readyState !== WebSocket.OPEN) return;
+        while (audioBuffer.length > 0) ws.send(audioBuffer.shift());
+      }
+
       function connectWebSocket() {
+        wsReady = false;
         ws = new WebSocket(MODAL_WS_URL + '/stream');   // token goes in the first frame
 
         ws.onopen = () => {
@@ -509,10 +523,8 @@
                   setStatus('Listening...', 'listening');
                   // Deepgram is live and the server's receive loop is running, so
                   // buffered audio can safely go out now.
-                  while (audioBuffer.length > 0) {
-                    const chunk = audioBuffer.shift();
-                    if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
-                  }
+                  wsReady = true;
+                  flushAudio();
                 } else if (msg.data === 'disconnected') {
                   setStatus('Server reconnecting...', '');
                 }
@@ -529,6 +541,7 @@
         };
 
         ws.onclose = (e) => {
+          wsReady = false;
           stopHeartbeat();
           if (intentionalStop || e.code === 4001) return;
           if (isRecording) {
@@ -570,12 +583,12 @@
 
           mediaRecorder.ondataavailable = (e) => {
             if (e.data.size === 0) return;
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(e.data);
-            } else {
-              audioBuffer.push(e.data);
-              if (audioBuffer.length > AUDIO_BUFFER_MAX) audioBuffer.shift();
-            }
+            // Always buffer first, then flush. This is the only producer for
+            // audioBuffer, and flushAudio() is the only consumer, so a chunk
+            // can never jump ahead of older chunks still waiting to go out.
+            audioBuffer.push(e.data);
+            if (audioBuffer.length > AUDIO_BUFFER_MAX) audioBuffer.shift();
+            flushAudio();
           };
 
           mediaRecorder.start(250);
