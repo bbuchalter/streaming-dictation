@@ -213,7 +213,7 @@ class StreamingDictation:
             x_client_version: str = Header(default="?"),
         ):
             scheme, _, tok = authorization.partition(" ")
-            if scheme.lower() != "bearer" or not hmac.compare_digest(tok, expected_token):
+            if scheme.lower() != "bearer" or not hmac.compare_digest(tok.encode("utf-8"), expected_token.encode("utf-8")):
                 print(f"auth rejected client_epoch={x_client_version}")
                 raise HTTPException(status_code=401, detail="invalid token")
             print(f"auth ok client_epoch={x_client_version}")
@@ -230,14 +230,10 @@ class StreamingDictation:
             # Retire it only per the spec's "Retiring the legacy path" gate.
             legacy = ws.query_params.get("token")
             if legacy is not None:
-                if not hmac.compare_digest(legacy, expected_token):
+                if not hmac.compare_digest(legacy.encode("utf-8"), expected_token.encode("utf-8")):
                     await ws.close(code=4001, reason="Unauthorized")
                     return
                 print("stream auth ok via legacy query param — stale client")
-                await ws.send_json({
-                    "type": "error",
-                    "data": "This page is out of date — please reload it.",
-                })
             else:
                 try:
                     first = await asyncio.wait_for(ws.receive(), timeout=10)
@@ -252,7 +248,7 @@ class StreamingDictation:
                 if tok is None:
                     await ws.close(code=4002, reason="Expected token as first text frame")
                     return
-                if not hmac.compare_digest(tok, expected_token):
+                if not hmac.compare_digest(tok.encode("utf-8"), expected_token.encode("utf-8")):
                     await ws.close(code=4001, reason="Unauthorized")
                     return
                 print("stream auth ok via first frame")
