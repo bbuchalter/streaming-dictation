@@ -272,7 +272,10 @@
       let analyser = null;
       let levelRAF = null;
       let audioBuffer = [];
-      let wsReady = false; // true only between the 'listening' status and close/reconnect
+      // The socket that has reached 'listening'. A reference rather than a
+      // boolean so readiness can never be claimed by, or revoked on behalf of,
+      // a socket that is no longer the current one.
+      let readySocket = null;
       let reconnectAttempts = 0;
       let reconnectTimer = null;
       let heartbeatTimer = null;
@@ -536,25 +539,47 @@
       // through whenever the socket happens to be OPEN) can race the flush
       // and deliver a newer chunk before older ones still waiting in the
       // buffer, corrupting the WebM container sent to Deepgram.
-      function flushAudio() {
-        if (!wsReady || !ws || ws.readyState !== WebSocket.OPEN) return;
-        while (audioBuffer.length > 0) ws.send(audioBuffer.shift());
+      //
+      // flushAudio takes its socket rather than reading `ws`, so a stale
+      // 'listening' can never drain the buffer into a newer socket.
+      function flushAudio(sock) {
+        if (!sock || sock !== readySocket || sock.readyState !== WebSocket.OPEN) return;
+        while (audioBuffer.length > 0) {
+          const chunk = audioBuffer.shift();
+          try {
+            sock.send(chunk);
+          } catch (_) {
+            // send() throws on a CLOSING socket. The chunk is already off the
+            // buffer by now, so put it back rather than dropping it.
+            audioBuffer.unshift(chunk);
+            return;
+          }
+        }
       }
 
       function connectWebSocket() {
-        wsReady = false;
-        ws = new WebSocket(MODAL_WS_URL + '/stream');   // token goes in the first frame
+        readySocket = null;
+        // Capture the socket in the closure. Pressing Stop and then Start inside
+        // the connect window orphans a socket, and the server's 4002 auth timeout
+        // then fires that socket's onclose about ten seconds later. Without the
+        // `sock !== ws` guards below, those handlers act on the healthy socket
+        // that replaced it: audio stalls, its heartbeat is killed, a third socket
+        // is spawned, and the socket left behind holds a Deepgram session open.
+        const sock = new WebSocket(MODAL_WS_URL + '/stream');   // token in the first frame
+        ws = sock;
 
-        ws.onopen = () => {
+        sock.onopen = () => {
+          if (sock !== ws) return;
           reconnectAttempts = 0;
           startHeartbeat();
-          ws.send(sessionToken);   // first text frame is the bearer token
+          sock.send(sessionToken);   // first text frame is the bearer token
           // Do NOT flush audio here. The server has not entered its receive loop
           // until it reports 'listening', so anything sent now would sit in the
           // socket buffer and arrive late. The flush happens on 'listening'.
         };
 
-        ws.onmessage = (e) => {
+        sock.onmessage = (e) => {
+          if (sock !== ws) return;   // a superseded socket must not paint captions
           try {
             const msg = JSON.parse(e.data);
             switch (msg.type) {
@@ -565,8 +590,8 @@
                   setStatus('Listening...', 'listening');
                   // Deepgram is live and the server's receive loop is running, so
                   // buffered audio can safely go out now.
-                  wsReady = true;
-                  flushAudio();
+                  readySocket = sock;
+                  flushAudio(sock);
                 } else if (msg.data === 'disconnected') {
                   setStatus('Server reconnecting...', '');
                 }
@@ -582,8 +607,9 @@
           } catch (_) {}
         };
 
-        ws.onclose = (e) => {
-          wsReady = false;
+        sock.onclose = (e) => {
+          if (sock !== ws) return;
+          readySocket = null;
           stopHeartbeat();
           if (intentionalStop || e.code === 4001) return;
           if (isRecording) {
@@ -591,7 +617,7 @@
           }
         };
 
-        ws.onerror = () => {};
+        sock.onerror = () => {};
       }
 
       function attemptReconnect() {
@@ -599,6 +625,7 @@
         // Backoff: 1s, 2s, 4s, 8s, then stay at 8s forever
         const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 8000);
         setStatus(`Reconnecting (attempt ${reconnectAttempts})...`, '');
+        if (reconnectTimer) clearTimeout(reconnectTimer);   // two timers race two sockets
         reconnectTimer = setTimeout(connectWebSocket, delay);
       }
 
@@ -630,7 +657,7 @@
             // can never jump ahead of older chunks still waiting to go out.
             audioBuffer.push(e.data);
             if (audioBuffer.length > AUDIO_BUFFER_MAX) audioBuffer.shift();
-            flushAudio();
+            flushAudio(ws);
           };
 
           mediaRecorder.start(250);
@@ -658,11 +685,15 @@
         }
         mediaRecorder = null;
 
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send('EOS');
+        if (ws) {
+          // Close regardless of readyState. A CONNECTING socket left alive here is
+          // the orphan whose 4002 close later disrupts its own replacement, and it
+          // holds a Deepgram session and a concurrency slot server-side meanwhile.
+          if (ws.readyState === WebSocket.OPEN) ws.send('EOS');
           ws.close();
         }
         ws = null;
+        readySocket = null;
 
         if (micStream) {
           micStream.getTracks().forEach(t => t.stop());
