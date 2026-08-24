@@ -1,4 +1,4 @@
-# Auth Protocol Redesign: Cheap Login, Honest Errors
+# Auth Protocol Redesign and Client Upgrade Path
 
 ## Overview
 
@@ -15,9 +15,14 @@ Because GitHub Pages caches `index.html` for 10 minutes and an already-open tab 
 at all, the server accepts both the old and new handshakes for a transition period. Deploying the
 server cannot break a client that has not reloaded.
 
-Scope is Group B of the twelve findings from the 2026-08-24 investigation: findings 1, 2, 7, 8, 9,
-plus a client version handshake that makes staleness observable and self-correcting. Groups A, C,
-and D are explicitly out of scope (see the last section).
+Scope is findings 1, 2, 7, 8, 9, 10, and 11 of the twelve from the 2026-08-24 investigation, plus a
+client version handshake that makes staleness observable and self-correcting.
+
+Findings 10 and 11 — the broken service worker — were originally deferred to a separate sub-project.
+They are included here because they turn out to *be* the upgrade path: a client's registration of
+`service-worker.js` is the only channel through which a browser running frozen JavaScript can be
+given new capability. Deferring them is what would leave today's installed clients permanently
+un-upgradeable. Findings 3, 4, 5, 6 (Group A) and 12 (Group D) remain out of scope.
 
 ## Background: the incident this comes from
 
@@ -376,6 +381,130 @@ buffer.
 The last row is the incident that motivated this work. It would have read
 `Deepgram connection failed: HTTP 401` instead of "Invalid password."
 
+## Service Worker
+
+This section exists because the service worker is the upgrade path. A browser running frozen
+JavaScript re-executes `navigator.serviceWorker.register('service-worker.js')` on every page load
+(`index.html:623`), and that request goes to GitHub Pages, which we control. The top-level worker
+script also bypasses the HTTP cache on update checks — `updateViaCache` defaults to `'imports'` — so a
+corrected worker is picked up on the very next navigation rather than up to 600 seconds later.
+
+The page's code is frozen. The worker it registers is not. That asymmetry is the whole mechanism.
+
+### The two defects
+
+`service-worker.js:2` lists root-absolute paths:
+
+```javascript
+const ASSETS = ['/', '/index.html', '/manifest.json', '/icon-192.png', '/icon-512.png'];
+```
+
+The site is served from `/streaming-dictation/`, so all five resolve against the domain root and all
+five return 404 (measured; no root Pages site exists). `cache.addAll()` rejects as a unit, `install`
+fails, and the worker never activates.
+
+`service-worker.js:12` is cache-first with no invalidation against a static `CACHE_NAME`:
+
+```javascript
+caches.match(e.request).then((cached) => cached || fetch(e.request))
+```
+
+Fixing only the paths would therefore be *worse* than the status quo: a working install would pin a
+standalone window to the first `index.html` it ever cached, permanently, with no address bar to escape
+through. The two defects must be fixed together.
+
+### Replacement
+
+```javascript
+const CACHE  = 'dictation-e2';   // bump in lockstep with CLIENT_EPOCH in index.html
+const ASSETS = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
+
+self.addEventListener('install', (e) => {
+  e.waitUntil((async () => {
+    const c = await caches.open(CACHE);
+    // Individually, not addAll: one missing asset must not fail the whole install.
+    await Promise.allSettled(ASSETS.map((u) => c.add(new Request(u, { cache: 'reload' }))));
+    await self.skipWaiting();
+  })());
+});
+
+self.addEventListener('activate', (e) => {
+  e.waitUntil((async () => {
+    const names = await caches.keys();
+    await Promise.all(names.filter((n) => n !== CACHE).map((n) => caches.delete(n)));
+    await self.clients.claim();
+  })());
+});
+
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  if (new URL(req.url).origin !== self.location.origin) return;  // never touch modal.run
+
+  if (req.mode === 'navigate') {
+    e.respondWith((async () => {
+      try {
+        const fresh = await fetch(req.url, { cache: 'reload' });   // bypass the 600s HTTP cache
+        // waitUntil, not fire-and-forget: the worker may be terminated as soon as
+        // respondWith settles, which would abandon the write mid-flight.
+        e.waitUntil(caches.open(CACHE).then((c) => c.put('./', fresh.clone())));
+        return fresh;
+      } catch (_) {
+        return (await caches.match('./')) || Response.error();     // offline fallback
+      }
+    })());
+    return;
+  }
+
+  e.respondWith(caches.match(req).then((hit) => hit || fetch(req)));
+});
+```
+
+Each departure from the original earns its place:
+
+- **Relative paths** resolve against the worker's own scope, `/streaming-dictation/`, which is what
+  the manifest already does correctly.
+- **Per-asset `cache.add` under `Promise.allSettled`** means a single 404 degrades offline coverage
+  instead of disabling the worker entirely. This is a direct response to how the original failed: one
+  bad path took down the whole mechanism silently.
+- **`cache: 'reload'` on precache fetches** avoids seeding the cache from a stale HTTP entry.
+- **Versioned `CACHE` plus purge-on-activate** removes the stranding failure mode and cleans up the
+  existing empty `dictation-v1`.
+- **`skipWaiting()` + `clients.claim()`** let the corrected worker take control on first install
+  rather than waiting for every window to close — which, for a standalone PWA, might be never.
+- **Network-first navigation with `cache: 'reload'`** eliminates the 600-second staleness window
+  entirely for controlled clients, while the cache fallback preserves offline launch.
+- **The origin guard** keeps the worker away from the Modal endpoint. The WebSocket is not a `fetch`
+  and would not be intercepted regardless, but `/auth` is a cross-origin `fetch` and must not be
+  cached or interfered with.
+
+### What today's clients actually get, and when
+
+| Event | Result |
+|-------|--------|
+| Next navigation (cold PWA launch, reload, new tab) | Fetches the corrected worker, installs successfully, activates, claims the page. HTML for *this* navigation may still be stale, since the worker was not yet controlling it. |
+| Navigation after that | Served network-first. Always current. The 600-second window is gone for good. |
+
+So: **one navigation to become upgradeable, two to be guaranteed current.** That is the honest bound,
+and it is a bounded wait rather than the "never" an un-repaired worker implies.
+
+### Why the worker does not force a reload
+
+Once activated it could call `WindowClient.navigate()` and refresh open windows outright. It must not.
+A navigation destroys the page, the `MediaRecorder`, and the WebSocket, so forcing one mid-talk would
+end a recording in progress — strictly worse than running stale code for another hour. The worker
+cannot see `isRecording`, and plumbing that through `postMessage` would mean the old, frozen client
+would have to cooperate, which it cannot.
+
+Upgrades are therefore taken at the next natural navigation, or offered through the banner described
+above. Never imposed.
+
+### Version coupling
+
+`CACHE` in `service-worker.js` and `CLIENT_EPOCH` in `index.html` must be bumped together. They live
+in different files with no shared source, which is a genuine footgun, so `check_login.py` asserts that
+the epoch implied by the deployed worker's cache name matches the deployed client's `CLIENT_EPOCH`.
+
 ## Testing
 
 This repository has no test infrastructure. This design adds `check_login.py`, a committed
@@ -394,6 +523,8 @@ integration smoke test run against the deployed endpoint:
 | `/stream?token=<wrong>` (legacy client) | close `4001` |
 | `GET /auth` with `X-Client-Version` below the floor | `200` with `min_client_epoch` above the sent value |
 | `OPTIONS /auth` preflight requesting `X-Client-Version` | `200`, header listed in `Access-Control-Allow-Headers` |
+| Every path in the deployed worker's `ASSETS`, fetched | `200` (this is the check the original bug would have failed) |
+| `CACHE` epoch in deployed `service-worker.js` vs `CLIENT_EPOCH` in deployed `index.html` | equal |
 
 The `/auth` checks fail with `404` against the server as it stands today, so this is genuinely
 test-first: write the checks, watch them fail, implement, watch them pass.
@@ -410,6 +541,8 @@ The script reads the token from `MODAL_BEARER_TOKEN` in `.env` (gitignored) and 
 - The heartbeat and reconnection *mechanism* (Group A revises its behavior, not this design).
 - The endpoint hostname, so `MODAL_WS_URL` needs no edit.
 - `sessionStorage` as the place the token is cached after a successful login.
+- `manifest.json`, which already uses correct relative paths and needs no edit.
+- The set of files the service worker precaches; only how it fetches and invalidates them changes.
 
 ## Deployment & Operations
 
@@ -426,14 +559,24 @@ custom headers. That fixed 10-minute window governs how fast a client can pick u
 
 The last row is the operationally significant one. This is a captioning app left open on a screen for
 the length of a talk, so a long-lived tab running old JavaScript is the normal case rather than an
-edge case. The operator cannot be relied on to hard-refresh every client.
+edge case. The operator cannot be relied on to refresh every client by hand.
 
-The service worker is *not* a factor. All five entries in `ASSETS` (`service-worker.js:2`) are
-root-absolute and resolve against the Pages domain root rather than `/streaming-dictation/`; all five
-return 404, and no root Pages site exists. `cache.addAll()` therefore rejects, `install` fails, the
-worker never activates, and its `fetch` handler never intercepts a request. This changes once Group C
-fixes finding 10, at which point this section must be revisited — a working cache reintroduces
-staleness that only a network-first navigation strategy can bound.
+The table above describes the situation *today*, with no service worker active — verified in a real
+browser: `getRegistrations()` empty, `controller` null, and the `dictation-v1` cache present but
+empty because `caches.open()` succeeds before `addAll()` rejects.
+
+The Service Worker section replaces that table. Once a client is controlled by the corrected worker,
+navigations are served network-first with `cache: 'reload'`, so the 600-second window closes and the
+only remaining question is when a client next navigates:
+
+| Client state, after the worker is installed | Picks up new `index.html`? |
+|---------------------------------------------|----------------------------|
+| Any navigation — cold PWA launch, reload, new tab | Yes, always current; the HTTP cache is bypassed |
+| Window open and never navigating again | No — and no mechanism can safely force it (see the Service Worker section) |
+
+The residual unreachable case is therefore narrower than the HTTP-cache analysis suggests: not "any
+open window for up to 10 minutes and possibly forever," but "a window that never navigates again,"
+which cannot be remediated without destroying an in-progress recording.
 
 ### Installed PWA clients
 
@@ -462,12 +605,11 @@ layer of staleness on top of the HTTP cache.
 Installed PWAs are consequently the strongest argument for the dual-protocol support described below,
 not an exception to it.
 
-**Hazard for Group C.** Fixing the `ASSETS` paths without also fixing the caching strategy is
-materially worse for installed PWAs than the status quo. `service-worker.js:12` is cache-first with no
-invalidation against a static `CACHE_NAME`, so a working install would strand a standalone window on
-the first `index.html` it ever cached — permanently, with no address bar to escape through. Group C
-must use a network-first strategy for navigation requests, and should pair a versioned cache name with
-`skipWaiting()` and `clients.claim()`.
+An earlier draft of this section overstated the problem in one direction and understated it in
+another. Overstated: iOS and Android routinely evict backgrounded web apps, so a cold relaunch — and
+therefore a navigation — happens far more often in practice than "indefinitely" implies. Understated:
+the draft treated the broken service worker as merely harmless, when in fact repairing it is the
+mechanism that makes these clients upgradeable at all. See the Service Worker section.
 
 ### Backward compatibility
 
@@ -498,9 +640,13 @@ controls when clients refresh. That assumption is false, and the rejection was w
 1. `modal deploy modal_app.py` with `MIN_CLIENT_EPOCH` left at its current value — the new server
    serves both client generations, so nothing breaks
 2. `python3 check_login.py` — validates both the new and the legacy paths against the deployed server
-3. Commit and push `index.html` with `CLIENT_EPOCH` incremented
+3. Commit and push `index.html` (with `CLIENT_EPOCH` incremented) and `service-worker.js` (with
+   `CACHE` bumped to match) in the same push, so the navigation that updates a client's protocol also
+   installs its future upgrade capability
 4. Confirm `https://bbuchalter.github.io/streaming-dictation/` actually serves the new build. GitHub
-   Pages caches for 600 seconds, so this is not immediate; check the version label on the auth gate
+   Pages caches for 600 seconds, so this is not immediate; check the version label on the auth gate.
+   Note that a client's *first* navigation after this push installs the worker but may still receive
+   stale HTML; the navigation after that is guaranteed current
 5. Only then raise `MIN_CLIENT_EPOCH` to the new value and `modal deploy` again. This arms the upgrade
    banner. Doing it before step 4 is what the min-epoch design and the `sessionStorage` guard exist to
    survive, but the ordering avoids relying on either
@@ -555,18 +701,18 @@ is unchanged.
 | 7 | Bearer token travels in the URL query string | Partial: new clients use the first WebSocket frame and an `Authorization` header; the legacy query-param branch stays until retired (see Deployment) |
 | 8 | `os.environ["BEARER_TOKEN"]` read inside the request handler | Read and validated at container construction |
 | 9 | Login check opens a billable Deepgram session | `GET /auth` touches no upstream service |
+| 10 | Root-absolute `ASSETS` paths break service worker installation | Relative paths, plus per-asset `cache.add` so one failure cannot fail the install |
+| 11 | Cache-first with no invalidation would strand users on stale HTML | Network-first navigation with `cache: 'reload'`, versioned cache, `skipWaiting()` + `clients.claim()` |
 
 ## Out of Scope
 
-Deferred to their own sub-projects, in this order:
+Deferred to their own sub-projects. Findings 10 and 11 were previously listed here and have been
+pulled into this design; see the Overview for why.
 
 - **Group A — diagnosability** (findings 3, 4, 5, 6): mid-session `4001` kills the session silently;
   the heartbeat sends a `PING` the server never reads, so it cannot detect a black-holed connection;
   five blanket `except Exception: pass` handlers on the server; unlimited reconnection masks
   permanent faults. Group A consumes the `4003` close code introduced here.
-- **Group C — service worker** (findings 10, 11): root-absolute `ASSETS` paths break installation on
-  GitHub Pages, and cache-first with no invalidation would strand users on a stale `index.html` once
-  installation works. These must ship together.
 - **Group D — housekeeping** (finding 12): `.env` carries dead `MODAL_POLISH_URL` and
   `REVAI_ACCESS_TOKEN` entries from the pre-Deepgram architecture, plus a `MODAL_BEARER_TOKEN` that no
   committed code reads.
