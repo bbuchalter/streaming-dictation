@@ -15,6 +15,36 @@ MIN_CLIENT_EPOCH = 2
 # inlined so the pair stays greppable together.
 AUTH_TIMEOUT_SECONDS = 10
 
+# The cleanup model is free to decide a segment isn't speech and answer
+# conversationally instead of cleaning it. On a numeric transcript — the words
+# "one one thousand, two one thousand, ..." reach Deepgram as digits — it
+# reliably replied "I cannot clean this input as it contains only numbers,"
+# and polish_text handed that sentence to the browser as if the speaker had
+# said it. Strengthening the prompt was tried once (98d81c0) and did not hold,
+# because nothing in the request made commentary malformed. This does: the only
+# well-formed reply is a JSON object whose one field is the cleaned text, so
+# there is nowhere for a conversational turn to go.
+POLISH_SCHEMA = {
+    "type": "object",
+    "properties": {"cleaned": {"type": "string"}},
+    "required": ["cleaned"],
+    "additionalProperties": False,
+}
+
+# Backstop for the rare reply that satisfies the schema and is still commentary
+# (1 in 20 on the numeric segment above). Cleaning fixes punctuation and drops
+# fillers, so it never grows a segment by much — whereas a refusal explains
+# itself at length. Judged by length rather than by matching refusal wording,
+# which would misfire the first time a talk contains the words "I cannot".
+POLISH_MAX_EXPANSION = 2
+POLISH_EXPANSION_SLACK = 8
+
+# Raised from the 256 this used to run at. A truncated reply is now unparseable
+# JSON rather than a partial sentence, so the ceiling needs headroom the
+# plain-text version did not: the wrapper and its escaping cost tokens on every
+# reply. A 300-word segment lands well inside this.
+POLISH_MAX_TOKENS = 1024
+
 image = modal.Image.debian_slim(python_version="3.11").pip_install(
     "anthropic",
     "fastapi",
@@ -214,25 +244,45 @@ class StreamingDictation:
                 "&smart_format=true"
             )
 
+        def is_commentary(raw: str, polished: str) -> bool:
+            return (
+                len(polished.split())
+                > POLISH_MAX_EXPANSION * len(raw.split()) + POLISH_EXPANSION_SLACK
+            )
+
         def polish_text(client, raw: str, context: str) -> str:
+            """Clean one transcript segment. Returns the speaker's words, never
+            commentary about them — falling back to Deepgram's own text when the
+            cleanup can't be trusted, since a live talk is better served by an
+            unpolished sentence than by a hole or an apology."""
             if not raw.strip():
                 return ""
             user_message = (
                 f"<context>{context}</context>\n"
                 f"<raw>{raw}</raw>\n"
-                f"Output ONLY the cleaned version of the text in <raw>. "
-                f"No commentary, no explanations, no prefixes. Just the cleaned text."
+                f"Return the cleaned version of the text in <raw>."
             )
             try:
                 response = client.messages.create(
                     model="claude-haiku-4-5-20251001",
-                    max_tokens=256,
+                    max_tokens=POLISH_MAX_TOKENS,
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user_message}],
+                    output_config={
+                        "format": {"type": "json_schema", "schema": POLISH_SCHEMA}
+                    },
                 )
-                return response.content[0].text
+                if response.stop_reason == "max_tokens":
+                    return raw
+                polished = json.loads(response.content[0].text)["cleaned"].strip()
             except Exception:
-                return ""
+                return raw
+            # An empty result is the model saying the segment was all filler;
+            # process_transcripts drops it, which is what we want. Only a
+            # non-empty reply can be commentary.
+            if polished and is_commentary(raw, polished):
+                return raw
+            return polished
 
         @web_app.get("/auth")
         def auth(
