@@ -1,4 +1,5 @@
 """Inventory the deployed Modal image in an isolated sandbox and query OSV."""
+import argparse
 import json
 import re
 import subprocess
@@ -10,6 +11,7 @@ from security_update import advisories
 
 
 INVENTORY = r"""
+from importlib.metadata import distributions
 import json
 from pathlib import Path
 import platform
@@ -24,9 +26,10 @@ assert os_info["ID"] == "debian", "Unsupported base image distribution"
 print(json.dumps({
     "debian": os_info["VERSION_ID"].strip('"'),
     "python": platform.python_version(),
-    "pip": json.loads(subprocess.check_output(
-        ["python", "-m", "pip", "list", "--format=json"], text=True,
-    )),
+    "python_packages": [
+        {"name": package.metadata["Name"], "version": package.version}
+        for package in distributions()
+    ],
     "deb": subprocess.check_output(
         ["dpkg-query", "-W", "-f=${db:Status-Abbrev}\t${source:Package}\t${source:Version}\n"],
         text=True,
@@ -35,13 +38,16 @@ print(json.dumps({
 """
 
 
-def inventory():
+def deployed_image_id():
     info = json.loads(subprocess.check_output(
         ["modal", "function", "info", "streaming-dictation/StreamingDictation.*",
          "--env", "main", "--json"],
         text=True,
     ))
-    image_id = info["image_info"]["image_id"]
+    return info["image_info"]["image_id"]
+
+
+def inventory(image_id):
     print(f"Auditing deployed image {image_id}", flush=True)
     app = modal.App.lookup("streaming-dictation", environment_name="main")
     sandbox = modal.Sandbox.create(
@@ -63,14 +69,17 @@ def query(ecosystem, name, version):
 
 
 def main():
-    data = inventory()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--image", help="Audit a candidate Modal image ID before deployment")
+    args = parser.parse_args()
+    data = inventory(args.image or deployed_image_id())
     debian = f"Debian:{data['debian']}"
     packages = set()
     for line in data["deb"]:
         status, name, version = line.split("\t")
         if status.startswith("ii"):
             packages.add((debian, name, version))
-    packages.update(("PyPI", p["name"], p["version"]) for p in data["pip"])
+    packages.update(("PyPI", p["name"], p["version"]) for p in data["python_packages"])
     print(f"Checking {len(packages)} Python and Debian package versions")
     queries = [query(*package) for package in sorted(packages)]
     findings = []

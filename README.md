@@ -79,6 +79,10 @@ The application limits login requests and pending WebSocket handshakes per
 container. Apply deployment-wide rate limits at ingress where available.
 `requirements.txt` pins the application Python dependencies. Inventory and
 scan Python and Debian packages from the exact deployed image after deploying.
+The runtime uses a digest-pinned official Python image. Update the digest for
+new CPython patches. Set `MODAL_FORCE_BUILD=1` when rebuilding to pick up newer
+Debian packages from APT without changing the base digest. Packaging tools are
+removed after the application dependencies pass `pip check`.
 
 ### Automated security updates
 

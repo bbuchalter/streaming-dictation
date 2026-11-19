@@ -24,8 +24,25 @@ DRAIN_TIMEOUT_SECONDS = 5
 MAX_PENDING_HANDSHAKES = 4
 MAX_AUDIO_FRAME_BYTES = 64 * 1024
 
-image = modal.Image.debian_slim(python_version="3.11").pip_install_from_requirements(
-    "requirements.txt"
+# Official linux/amd64 python:3.11.18-slim-trixie image.
+PYTHON_BASE_IMAGE = (
+    "docker.io/library/python@sha256:"
+    "b701198cb708b68d9413ca67d6311bd97c9389a2c5fe4da0511fc652642366cd"
+)
+
+image = (
+    modal.Image.from_registry(PYTHON_BASE_IMAGE)
+    .run_commands(
+        "apt-get update"
+        " && DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade"
+        " && rm -rf /var/lib/apt/lists/*"
+    )
+    .pip_install_from_requirements("requirements.txt")
+    .run_commands(
+        "python -m pip check"
+        " && python -m pip uninstall -y setuptools uv wheel pip"
+        " && rm -rf /root/.cache/pip"
+    )
 )
 
 
