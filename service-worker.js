@@ -1,5 +1,5 @@
 // Bump CACHE in lockstep with CLIENT_EPOCH in index.html.
-const CACHE  = 'dictation-e2';
+const CACHE  = 'dictation-e3';
 // Relative, so they resolve against this worker's scope (/streaming-dictation/).
 // The previous version used root-absolute paths, which 404'd and disabled the
 // whole worker. manifest.json already gets this right.
@@ -46,7 +46,7 @@ self.addEventListener('fetch', (e) => {
         // Cache.put stores any of them as willingly as the real app — which
         // poisons the offline fallback for every later launch.
         if (!fresh.ok) {
-          const cached = await caches.match('./');
+          const cached = await (await caches.open(CACHE)).match('./');
           if (cached) return cached;   // a page that worked beats an error page
           return fresh;                // nothing better to offer
         }
@@ -69,11 +69,11 @@ self.addEventListener('fetch', (e) => {
         // its login page to get past it — the rule is never to *keep* it.
         return fresh;
       } catch (_) {
-        return (await caches.match('./')) || Response.error();   // offline fallback
+        return (await (await caches.open(CACHE)).match('./')) || Response.error();   // offline fallback
       }
     })());
     return;
   }
 
-  e.respondWith(caches.match(req).then((hit) => hit || fetch(req)));
+  e.respondWith(caches.open(CACHE).then((c) => c.match(req)).then((hit) => hit || fetch(req)));
 });

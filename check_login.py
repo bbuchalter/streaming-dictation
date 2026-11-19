@@ -67,7 +67,7 @@ def http(url, method="GET", headers=None, timeout=90, decode=True):
 
 def check_auth_valid(tok):
     st, hdrs, body = http(f"{HTTP_BASE}/auth", headers={"Authorization": f"Bearer {tok}",
-                                                       "X-Client-Version": "2",
+                                                       "X-Client-Version": "3",
                                                        "Origin": PAGES_ORIGIN})
     acao = hdrs.get("access-control-allow-origin")
     ok = st == 200 and acao == PAGES_ORIGIN
@@ -112,7 +112,7 @@ def check_auth_preflight(_tok):
 
 def check_auth_floor(tok):
     st, _, body = http(f"{HTTP_BASE}/auth", headers={"Authorization": f"Bearer {tok}",
-                                                    "X-Client-Version": "2"})
+                                                    "X-Client-Version": "3"})
     floor = None
     if st == 200:
         try:
@@ -136,8 +136,10 @@ async def ws_probe(url, first_frame, recv_timeout):
                 if msg.get("type") == "status" and msg.get("data") == "listening":
                     await ws.send("EOS")
                     return "listening", None
+    except websockets.exceptions.InvalidStatus as e:
+        return "rejected", e.response.status_code
     except websockets.ConnectionClosed as e:
-        return "closed", e.code
+        return "closed", e.rcvd.code if e.rcvd else None
     except asyncio.TimeoutError:
         return "error", "recv timeout"
     except Exception as e:
@@ -145,7 +147,13 @@ async def ws_probe(url, first_frame, recv_timeout):
 
 
 async def check_ws(tok):
-    outcome, info = await ws_probe(f"{WS_BASE}/stream", tok, 90)
+    status, headers, body = http(f"{HTTP_BASE}/auth", headers={"Authorization": f"Bearer {tok}"})
+    session = json.loads(body).get("session") if status == 200 else None
+    record("http_session", bool(session) and headers.get("cache-control") == "no-store",
+           f"status={status}, cache-control={headers.get('cache-control')!r}")
+    if not session:
+        return
+    outcome, info = await ws_probe(f"{WS_BASE}/stream", session, 90)
     record("ws_frame_valid", outcome == "listening", f"got {outcome} {info}")
 
     outcome, info = await ws_probe(f"{WS_BASE}/stream", WRONG, 60)
@@ -154,13 +162,9 @@ async def check_ws(tok):
     outcome, info = await ws_probe(f"{WS_BASE}/stream", None, 30)
     record("ws_frame_absent", outcome == "closed" and info == 4002, f"got {outcome} {info}")
 
-    q = f"{WS_BASE}/stream?token={urllib.parse.quote(tok)}"
-    outcome, info = await ws_probe(q, None, 90)
-    record("ws_legacy_valid", outcome == "listening", f"got {outcome} {info}")
-
-    q = f"{WS_BASE}/stream?token={urllib.parse.quote(WRONG)}"
-    outcome, info = await ws_probe(q, None, 60)
-    record("ws_legacy_wrong", outcome == "closed" and info == 4001, f"got {outcome} {info}")
+    outcome, info = await ws_probe(f"{WS_BASE}/stream?token=legacy-placeholder", None, 60)
+    record("ws_legacy_rejected", outcome == "rejected" and info == 403,
+           f"got {outcome} {info}")
 
 
 # ---------------- GitHub Pages checks ----------------

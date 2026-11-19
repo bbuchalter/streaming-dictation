@@ -1,12 +1,16 @@
 import asyncio
+import hashlib
+import hmac
 import json
+import os
+import re
+import time
 import modal
 
 app = modal.App("streaming-dictation")
 
-# Clients older than this are asked to reload. Raise only after GitHub Pages is
-# confirmed serving the newer build — see the plan's Task 8.
-MIN_CLIENT_EPOCH = 2
+# Clients older than this epoch need to reload to obtain streaming credentials.
+MIN_CLIENT_EPOCH = 3
 
 # Seconds /stream waits for the token as its first text frame. This is what
 # bounds how much of the function timeout below (10800s) a client that connects
@@ -15,19 +19,81 @@ MIN_CLIENT_EPOCH = 2
 # inlined so the pair stays greppable together.
 AUTH_TIMEOUT_SECONDS = 10
 
-image = modal.Image.debian_slim(python_version="3.11").pip_install(
-    "anthropic",
-    "fastapi",
-    "websockets",
+SESSION_TTL_SECONDS = 4 * 60 * 60
+DRAIN_TIMEOUT_SECONDS = 5
+MAX_PENDING_HANDSHAKES = 4
+MAX_AUDIO_FRAME_BYTES = 64 * 1024
+
+image = modal.Image.debian_slim(python_version="3.11").pip_install_from_requirements(
+    "requirements.txt"
 )
+
+
+class RateLimit:
+    """A per-container token bucket used only on the ASGI event loop."""
+
+    def __init__(self, burst, per_second):
+        self.burst = self.tokens = burst
+        self.per_second = per_second
+        self.updated = time.monotonic()
+
+    def allow(self):
+        now = time.monotonic()
+        self.tokens = min(self.burst, self.tokens + (now - self.updated) * self.per_second)
+        self.updated = now
+        if self.tokens < 1:
+            return False
+        self.tokens -= 1
+        return True
+
+
+def session_signature(secret, expiry):
+    message = f"streaming-dictation/session/v1:{expiry}".encode()
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def valid_session(secret, ticket):
+    if not ticket or not re.fullmatch(r"[0-9]{1,12}\.[a-f0-9]{64}", ticket):
+        return False
+    expiry, signature = ticket.split(".")
+    return int(expiry) > time.time() and hmac.compare_digest(
+        signature, session_signature(secret, expiry)
+    )
+
+
+# Only these reviewed substitutions may alter the words sent to the display.
+TRANSCRIPT_ALIASES = {
+    ("tick", "not", "han"): ("thich", "nhat", "hanh"),
+    ("tik", "nat", "han"): ("thich", "nhat", "hanh"),
+    ("tay",): ("thay",),
+}
+
+
+def words(text):
+    return re.findall(r"\w+", text.casefold())
+
+
+def correct_aliases(tokens):
+    normalized = []
+    offset = 0
+    while offset < len(tokens):
+        for alias, canonical in TRANSCRIPT_ALIASES.items():
+            if tuple(tokens[offset:offset + len(alias)]) == alias:
+                normalized.extend(canonical)
+                offset += len(alias)
+                break
+        else:
+            normalized.append(tokens[offset])
+            offset += 1
+    return normalized
+
 
 SYSTEM_PROMPT = """You are a transcription editor for live Buddhist Dharma talks in the Plum Village tradition of Thich Nhat Hanh.
 You receive raw speech-to-text output and clean it up.
 
 Rules:
 - Fix punctuation and capitalization
-- Remove filler words (um, uh, like, you know)
-- Preserve the speaker's words faithfully — do not restructure sentences
+- Preserve every word in order, including filler words. Only adjust punctuation and capitalization or correct the listed mishearings.
 - If a sentence is cut off at the end, include it as-is
 - Use the provided context for continuity — do not repeat words that were already in the previous segment
 - CRITICAL: Output ONLY the cleaned text. Never add commentary, explanations, or conversational responses. If the input is unclear, output your best guess at the cleaned text anyway.
@@ -139,13 +205,23 @@ TIBETAN TERMS:
 - Tonglen, Dzogchen, Rinpoche, Tulku, Bardo, Vajra, Vajrayana, Rigpa, Mahamudra"""
 
 
+frontend_settings = {
+    key: os.environ[key]
+    for key in ("DICTATION_FRONTEND_ORIGIN", "DICTATION_ALLOW_LOCALHOST")
+    if key in os.environ
+}
+secrets = [
+    modal.Secret.from_name("streaming-dictation-auth"),
+    modal.Secret.from_name("streaming-dictation-anthropic"),
+    modal.Secret.from_name("streaming-dictation-deepgram"),
+]
+if frontend_settings:
+    secrets.append(modal.Secret.from_dict(frontend_settings))
+
+
 @app.cls(
     image=image,
-    secrets=[
-        modal.Secret.from_name("streaming-dictation-auth"),
-        modal.Secret.from_name("streaming-dictation-anthropic"),
-        modal.Secret.from_name("streaming-dictation-deepgram"),
-    ],
+    secrets=secrets,
     scaledown_window=60,
     # 3 hours. The clock starts when the operator presses Start, which is before
     # the talk begins — mic checks, waiting for the room to settle, a false start.
@@ -159,17 +235,15 @@ class StreamingDictation:
     @modal.enter()
     def setup_client(self):
         import anthropic
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.Anthropic(timeout=4.0, max_retries=0)
 
     @modal.asgi_app()
     def web(self):
-        import os
         import websockets
-        import hmac
-        from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+        from fastapi import FastAPI, Header, HTTPException, Response, WebSocket, WebSocketDisconnect
         from fastapi.middleware.cors import CORSMiddleware
 
-        web_app = FastAPI()
+        web_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
         # Fail fast: web() runs once per container, so a missing or empty secret
         # becomes a visible crash loop instead of a per-request KeyError raised
@@ -193,12 +267,17 @@ class StreamingDictation:
         if not deepgram_key.strip():
             raise RuntimeError("DEEPGRAM_API_KEY is set but empty")
 
+        secret = expected_token.encode("utf-8")
+        login_limit = RateLimit(burst=10, per_second=0.5)
+        socket_limit = RateLimit(burst=10, per_second=1)
+        pending_handshakes = 0
+        allowed_origins = {os.getenv("DICTATION_FRONTEND_ORIGIN", "https://bbuchalter.github.io")}
+        if os.getenv("DICTATION_ALLOW_LOCALHOST") == "1":
+            allowed_origins.add("http://localhost:8080")
+
         web_app.add_middleware(
             CORSMiddleware,
-            allow_origins=[
-                "https://bbuchalter.github.io",   # scheme+host only — never a path
-                "http://localhost:8000",          # python3 -m http.server, for testing client changes
-            ],
+            allow_origins=sorted(allowed_origins),
             allow_methods=["GET"],
             allow_headers=["Authorization", "X-Client-Version"],
             allow_credentials=False,
@@ -230,56 +309,62 @@ class StreamingDictation:
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user_message}],
                 )
-                return response.content[0].text
+                polished = response.content[0].text.strip()
+                raw_words = words(raw)
+                polished_words = words(polished)
+                if (
+                    polished
+                    and len(polished) <= len(raw) + 2 * len(raw_words) + 4
+                    and polished_words in (raw_words, correct_aliases(raw_words))
+                ):
+                    return polished
             except Exception:
-                return ""
+                pass
+            return raw
 
         @web_app.get("/auth")
-        def auth(
-            authorization: str = Header(default=""),
-            x_client_version: str = Header(default="?"),
-        ):
+        async def auth(response: Response, authorization: str = Header(default="")):
+            if not login_limit.allow():
+                raise HTTPException(status_code=429, detail="Too many login attempts")
             scheme, _, tok = authorization.partition(" ")
-            if scheme.lower() != "bearer" or not hmac.compare_digest(tok.encode("utf-8"), expected_token.encode("utf-8")):
-                print(f"auth rejected client_epoch={x_client_version}")
+            if scheme.lower() != "bearer" or not hmac.compare_digest(tok.encode("utf-8"), secret):
                 raise HTTPException(status_code=401, detail="invalid token")
-            print(f"auth ok client_epoch={x_client_version}")
-            return {"ok": True, "min_client_epoch": MIN_CLIENT_EPOCH}
+            expiry = int(time.time()) + SESSION_TTL_SECONDS
+            response.headers["Cache-Control"] = "no-store"
+            return {
+                "ok": True,
+                "min_client_epoch": MIN_CLIENT_EPOCH,
+                "session": f"{expiry}.{session_signature(secret, expiry)}",
+            }
 
         @web_app.websocket("/stream")
         async def stream(ws: WebSocket):
-            # Auth — must accept before we can close with a code
-            await ws.accept()
+            nonlocal pending_handshakes
+            origin = ws.headers.get("origin")
+            if (
+                "token" in ws.query_params
+                or (origin is not None and origin not in allowed_origins)
+                or pending_handshakes >= MAX_PENDING_HANDSHAKES
+                or not socket_limit.allow()
+            ):
+                await ws.close()
+                return
 
-            # LEGACY PATH: token in the query parameter. Clients cached before this
-            # change send it this way, and an installed PWA can stay stale
-            # indefinitely, so this branch cannot be removed on a deploy boundary.
-            # Retire it only per the spec's "Retiring the legacy path" gate.
-            legacy = ws.query_params.get("token")
-            if legacy is not None:
-                if not hmac.compare_digest(legacy.encode("utf-8"), expected_token.encode("utf-8")):
-                    await ws.close(code=4001, reason="Unauthorized")
-                    return
-                print("stream auth ok via legacy query param — stale client")
-            else:
+            pending_handshakes += 1
+            try:
+                await ws.accept()
                 try:
                     first = await asyncio.wait_for(ws.receive(), timeout=AUTH_TIMEOUT_SECONDS)
                 except asyncio.TimeoutError:
-                    # Without this, a client that connects and says nothing pins a
-                    # container for the whole function timeout. See
-                    # AUTH_TIMEOUT_SECONDS: the number lives there, once.
                     await ws.close(code=4002, reason="Auth timeout")
                     return
-                if isinstance(first, dict) and first.get("type") == "websocket.disconnect":
+                if first["type"] == "websocket.disconnect":
                     return
-                tok = first.get("text") if isinstance(first, dict) else None
-                if tok is None:
-                    await ws.close(code=4002, reason="Expected token as first text frame")
-                    return
-                if not hmac.compare_digest(tok.encode("utf-8"), expected_token.encode("utf-8")):
+                if not valid_session(secret, first.get("text")):
                     await ws.close(code=4001, reason="Unauthorized")
                     return
-                print("stream auth ok via first frame")
+            finally:
+                pending_handshakes -= 1
 
             await ws.send_json({"type": "status", "data": "authenticated"})
 
@@ -290,16 +375,14 @@ class StreamingDictation:
                     deepgram_url,
                     additional_headers={"Authorization": f"Token {deepgram_key}"},
                 )
-            except Exception as e:
-                await ws.send_json({"type": "error", "data": f"Deepgram connection failed: {type(e).__name__}: {e}"})
+            except Exception:
+                await ws.send_json({"type": "error", "data": "Deepgram connection failed"})
                 # 4003 = upstream permanently failed. A revoked key is not fixed by
                 # retrying. Today's client still reconnects on this code; Group A
                 # finding 6 teaches it to stop. The error frame above is what makes
                 # the real cause visible in the meantime.
                 await ws.close(code=4003, reason="Upstream unavailable")
                 return
-
-            await ws.send_json({"type": "status", "data": "listening"})
 
             context = ""
             browser_done = asyncio.Event()
@@ -310,8 +393,11 @@ class StreamingDictation:
                         data = await ws.receive()
                         if data["type"] == "websocket.disconnect":
                             break
-                        if "bytes" in data and data["bytes"]:
-                            await stt_ws.send(data["bytes"])
+                        if audio := data.get("bytes"):
+                            if len(audio) > MAX_AUDIO_FRAME_BYTES:
+                                await ws.close(code=1009)
+                                return
+                            await stt_ws.send(audio)
                         elif "text" in data and data["text"] == "EOS":
                             await stt_ws.send(json.dumps({"type": "CloseStream"}))
                             browser_done.set()
@@ -336,8 +422,7 @@ class StreamingDictation:
                                     )
                                     if polished:
                                         await ws.send_json({"type": "text", "data": polished})
-                                        words = polished.split()
-                                        context = " ".join(words[-50:])
+                                        context = " ".join(raw_text.split()[-50:])
                 except websockets.exceptions.ConnectionClosed:
                     if not browser_done.is_set():
                         try:
@@ -347,12 +432,21 @@ class StreamingDictation:
                 except Exception:
                     pass
 
+            tasks = []
             try:
-                await asyncio.gather(forward_audio(), process_transcripts())
+                await ws.send_json({"type": "status", "data": "listening"})
+                audio_task = asyncio.create_task(forward_audio())
+                transcript_task = asyncio.create_task(process_transcripts())
+                tasks.extend((audio_task, transcript_task))
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                if browser_done.is_set() and not transcript_task.done():
+                    await asyncio.wait({transcript_task}, timeout=DRAIN_TIMEOUT_SECONDS)
+                if browser_done.is_set():
+                    await ws.close(code=1000)
             finally:
-                try:
-                    await stt_ws.close()
-                except Exception:
-                    pass
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await stt_ws.close()
 
         return web_app

@@ -236,8 +236,8 @@
       const MODAL_WS_URL = 'wss://bbuchalter--streaming-dictation-streamingdictation-web.modal.run';
       const MODAL_HTTP_URL = MODAL_WS_URL.replace(/^wss:/, 'https:');  // one source of truth
       const AUTH_TIMEOUT_MS = 20000;   // cold start measured at 3.9-5.0s; 10s was too tight
-      const CLIENT_EPOCH  = 2;                // integer, compared by code
-      const VERSION_LABEL = 'v2026.08.24a';   // string, shown to humans
+      const CLIENT_EPOCH  = 3;                // integer, compared by code
+      const VERSION_LABEL = 'v2026.11.19';   // string, shown to humans
 
       const BUFFER_LIMIT = 5000;
       const STORAGE_KEY = 'dictation-transcript';
@@ -262,9 +262,15 @@
       const statusEl = document.getElementById('status');
 
       // ── State ──
-      let sessionToken = sessionStorage.getItem('sessionToken') || '';
+      let sessionToken = '';
       let isRecording = false;
-      let transcript = localStorage.getItem(STORAGE_KEY) || '';
+      let transcript = '';
+      // Migrate the previous transcript into memory so it can still be exported.
+      try {
+        transcript = localStorage.getItem(STORAGE_KEY) || '';
+        localStorage.removeItem(STORAGE_KEY);
+      } catch (_) {}
+      try { sessionStorage.removeItem('sessionToken'); } catch (_) {}
       let ws = null;
       let mediaRecorder = null;
       let micStream = null;
@@ -297,6 +303,7 @@
 
       // ── Auth ──
       async function authenticate() {
+        if (authSubmit.disabled) return;
         const token = passwordInput.value.trim();
         if (!token) return;
         authSubmit.disabled = true;
@@ -308,12 +315,13 @@
         clearTimeout(waking);
 
         if (result.ok) {
-          sessionToken = token;
-          sessionStorage.setItem('sessionToken', token);
+          sessionToken = result.session;
+          passwordInput.value = '';
+          authSubmit.disabled = false;
+          authSubmit.textContent = 'Connect';
           showApp();
           return;
         }
-        sessionStorage.removeItem('sessionToken');
         authSubmit.textContent = result.reason;
         setTimeout(() => { authSubmit.textContent = 'Connect'; authSubmit.disabled = false; }, 3000);
       }
@@ -334,7 +342,13 @@
             if (typeof body.min_client_epoch === 'number' && CLIENT_EPOCH < body.min_client_epoch) {
               maybeOfferUpgrade(body.min_client_epoch);
             }
-            return { ok: true };
+            if (typeof body.session !== 'string') {
+              return { ok: false, reason: 'Server update required' };
+            }
+            return { ok: true, session: body.session };
+          }
+          if (res.status === 429) {
+            return { ok: false, reason: 'Too many attempts. Try again shortly.' };
           }
           if (res.status === 401) return { ok: false, status: 401, reason: 'Invalid password' };
           return { ok: false, status: res.status, reason: `Server error (HTTP ${res.status})` };
@@ -394,22 +408,6 @@
         if (e.key === 'Enter') authenticate();
       });
 
-      if (sessionToken) {
-        checkAuth(sessionToken).then((result) => {
-          if (result.ok) { showApp(); return; }
-          // Only a genuine 401 means the cached token is bad. A 5xx, a timeout or
-          // venue wifi must not discard working credentials — and the operator
-          // needs to be told which of them happened, on the login path that runs
-          // most often. Showing nothing here was the branch's own thesis unapplied.
-          if (result.status === 401) {
-            sessionStorage.removeItem('sessionToken');
-            sessionToken = '';
-          }
-          authSubmit.textContent = result.reason;
-          setTimeout(() => { authSubmit.textContent = 'Connect'; }, 3000);
-        });
-      }
-
       // ── Caption display ──
       function renderDisplay() {
         const tail = transcript.length > BUFFER_LIMIT
@@ -425,7 +423,6 @@
           transcript += ' ';
         }
         transcript += text;
-        localStorage.setItem(STORAGE_KEY, transcript);
         renderDisplay();
       }
 
@@ -433,7 +430,6 @@
       btnClear.addEventListener('click', (e) => {
         e.stopPropagation();
         transcript = '';
-        localStorage.removeItem(STORAGE_KEY);
         captionText.textContent = '';
       });
 
@@ -583,14 +579,14 @@
         // `sock !== ws` guards below, those handlers act on the healthy socket
         // that replaced it: audio stalls, its heartbeat is killed, a third socket
         // is spawned, and the socket left behind holds a Deepgram session open.
-        const sock = new WebSocket(MODAL_WS_URL + '/stream');   // token in the first frame
+        const sock = new WebSocket(MODAL_WS_URL + '/stream');
         ws = sock;
 
         sock.onopen = () => {
           if (sock !== ws) return;
           reconnectAttempts = 0;
           startHeartbeat();
-          sock.send(sessionToken);   // first text frame is the bearer token
+          sock.send(sessionToken);
           // Do NOT flush audio here. The server has not entered its receive loop
           // until it reports 'listening', so anything sent now would sit in the
           // socket buffer and arrive late. The flush happens on 'listening'.
@@ -629,7 +625,18 @@
           if (sock !== ws) return;
           readySocket = null;
           stopHeartbeat();
-          if (intentionalStop || e.code === 4001) return;
+          if (intentionalStop) {
+            ws = null;
+            return;
+          }
+          if (e.code === 4001) {
+            sessionToken = '';
+            stopRecording();
+            authGate.style.display = '';
+            appEl.style.display = 'none';
+            authSubmit.textContent = 'Session expired. Connect again.';
+            return;
+          }
           if (isRecording) {
             attemptReconnect();
           }
@@ -655,6 +662,8 @@
         // for the length of the talk, with a live Reload button in it.
         document.getElementById('upgradeBanner').style.display = 'none';
         isRecording = true;
+        if (ws) ws.close();
+        ws = null;
         intentionalStop = false;
         reconnectAttempts = 0;
         audioBuffer = [];
@@ -708,13 +717,15 @@
         mediaRecorder = null;
 
         if (ws) {
-          // Close regardless of readyState. A CONNECTING socket left alive here is
-          // the orphan whose 4002 close later disrupts its own replacement, and it
-          // holds a Deepgram session and a concurrency slot server-side meanwhile.
-          if (ws.readyState === WebSocket.OPEN) ws.send('EOS');
-          ws.close();
+          const stoppingSocket = ws;
+          if (stoppingSocket === readySocket && stoppingSocket.readyState === WebSocket.OPEN) {
+            stoppingSocket.send('EOS');
+            setTimeout(() => stoppingSocket.close(), 6000);
+          } else {
+            stoppingSocket.close();
+            ws = null;
+          }
         }
-        ws = null;
         readySocket = null;
 
         if (micStream) {
