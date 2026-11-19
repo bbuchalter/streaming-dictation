@@ -1,0 +1,40 @@
+name: Deploy Modal backend
+
+on:
+  push:
+    branches: [main]
+    paths: [modal_app.py, requirements.txt]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: streaming-dictation-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: vars.MODAL_AUTOMATION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: streaming-dictation-production
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: python -m pip install modal==1.6.4
+      - name: Deploy
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: modal deploy --env main --tag "$(git rev-parse HEAD)" modal_app.py
+      - name: Verify that production requires authentication
+        run: |
+          status=$(curl --silent --show-error --max-time 90 --output /dev/null --write-out '%{http_code}' \
+            https://bbuchalter--streaming-dictation-streamingdictation-web.modal.run/auth)
+          test "$status" = 401

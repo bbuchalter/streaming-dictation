@@ -1,0 +1,54 @@
+name: Merge verified security update
+
+on:
+  workflow_run:
+    workflows: [Dependency security]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  merge-and-deploy:
+    if: >-
+      vars.MODAL_AUTOMATION_ENABLED == 'true' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      EVENT_HEAD: ${{ github.event.workflow_run.head_sha }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Verify eligibility using trusted workflow code
+        id: update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUIRE_ELIGIBLE: '1'
+        run: |
+          pr=$(gh api "repos/$GH_REPO/commits/$EVENT_HEAD/pulls" --jq \
+            '.[] | select(.state == "open" and .base.ref == "main" and .user.login == "dependabot[bot]") | .number')
+          test -n "$pr"
+          test "$(gh api "repos/$GH_REPO/pulls/$pr" --jq .head.sha)" = "$EVENT_HEAD"
+          test "$(gh api "repos/$GH_REPO/pulls/$pr/files" --jq '[.[].filename] | join(",")')" = requirements.txt
+          base=$(git rev-parse HEAD)
+          test "$(gh api "repos/$GH_REPO/pulls/$pr" --jq .base.sha)" = "$base"
+          gh api "repos/$GH_REPO/contents/requirements.txt?ref=$EVENT_HEAD" --jq .content \
+            | base64 --decode > requirements.txt
+          BASE_SHA="$base" python .github/scripts/security_update.py
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+      - name: Merge exact verified commit and dispatch deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.update.outputs.pr }}
+        run: |
+          gh pr merge "$PR" --squash --match-head-commit "$EVENT_HEAD"
+          gh workflow run deploy.yml --ref main

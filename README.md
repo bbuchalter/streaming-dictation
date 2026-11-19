@@ -80,6 +80,23 @@ container. Apply deployment-wide rate limits at ingress where available.
 `requirements.txt` pins the application Python dependencies. Inventory and
 scan Python and Debian packages from the exact deployed image after deploying.
 
+### Automated security updates
+
+Dependabot opens security PRs for the Python pins. GitHub Actions installs the
+proposed pins on Python 3.11, checks OSV, and tests authentication and streaming
+with mocked providers. Automatic merge is limited to a verified Dependabot PR
+that changes one pin within its current major version and fixes an OSV match.
+Other updates require review.
+
+The production deployment and weekly image audit use the
+`streaming-dictation-production` GitHub environment, restricted to `main`.
+Configure its `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` for a deployment
+identity with Contributor access to the Modal `main` environment. Then set the
+repository variable `MODAL_AUTOMATION_ENABLED` to `true` and run **Deploy Modal
+backend** manually to verify the connection. The scheduled audit inventories the
+deployed Debian and Python packages in an isolated sandbox, checks OSV, and flags
+when the interpreter is behind on patch releases.
+
 ## Cost
 
 ~$0.30/hr for a live talk (Deepgram STT + Modal compute + Claude Haiku API).
